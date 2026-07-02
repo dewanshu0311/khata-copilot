@@ -46,6 +46,11 @@ MATH_MISMATCH_REL_TRIGGER = float(os.getenv("MATH_MISMATCH_REL_TRIGGER", "0.2"))
 # page was likely misread as a whole and is worth one re-extraction.
 LOW_CONF_FRACTION_TRIGGER = float(os.getenv("LOW_CONF_FRACTION_TRIGGER", "0.5"))
 
+# ── Ledger storage (Phase 3) ─────────────────────────────────────────────────
+# SQLite file the Ledger Agent persists verified extractions into. Gitignored —
+# every environment builds its own from scanned pages.
+DB_PATH = os.getenv("KHATA_DB_PATH", "khata.db")
+
 # ── Demo safety ──────────────────────────────────────────────────────────────
 # When set to "1" (or when no GEMINI key exists) the vision agent returns a
 # canned extraction so the CLI/UI run fully offline. Always flagged degraded.

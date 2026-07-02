@@ -242,3 +242,48 @@ class VerificationResult(BaseModel):
             where = issue.entry_name or "page"
             lines.append(f"[{issue.severity.upper()}] {where}: {issue.message}")
         return lines
+
+
+# ── Ledger (Phase 3) ─────────────────────────────────────────────────────────
+# core/db.py returns these instead of raw sqlite rows, so downstream agents
+# (Insights, Reminder) get the same typed-schema guarantee as everything else.
+
+class CustomerBalance(BaseModel):
+    """A customer's outstanding total, as queried from the ledger."""
+
+    name: str = Field(..., description="Customer display name.")
+    unpaid_total: float = Field(..., description="Sum of amounts where status != 'paid'.")
+    paid_total: float = Field(..., description="Sum of amounts where status == 'paid'.")
+    entry_count: int = Field(..., description="Total number of ledger entries for this customer.")
+
+
+class LedgerEntryRecord(BaseModel):
+    """A single stored ledger entry, as read back from SQLite."""
+
+    id: int = Field(..., description="Row id in the entries table.")
+    customer_name: str = Field(..., description="Customer display name.")
+    amount: float = Field(..., description="Transaction amount in rupees.")
+    raw_date: Optional[str] = Field(None, description="Date exactly as written, or null.")
+    status: StatusLiteral = Field(..., description="'paid', 'unpaid', or 'unknown'.")
+    confidence: float = Field(..., description="Reader confidence for this entry, 0-1.")
+    raw_text: str = Field("", description="Original line text as read.")
+    source_image: str = Field(..., description="Source page image this entry came from.")
+    needs_review: bool = Field(..., description="True if this entry was flagged by verification.")
+    scanned_at: str = Field(..., description="Timestamp this entry was last stored/updated.")
+
+
+class MonthlyTotal(BaseModel):
+    """Sum of entry amounts for one calendar month (best-effort date parsing)."""
+
+    month: str = Field(..., description="'YYYY-MM', or 'unknown' if the raw date couldn't be parsed.")
+    total: float = Field(..., description="Sum of amounts in this bucket.")
+    entry_count: int = Field(..., description="Number of entries in this bucket.")
+
+
+class IngestSummary(BaseModel):
+    """What happened when a verified page was ingested into the ledger."""
+
+    source_image: str = Field(..., description="Page that was ingested.")
+    inserted: int = Field(0, description="Number of new entries inserted.")
+    updated: int = Field(0, description="Number of existing entries updated (re-scan).")
+    page_verdict: VerdictLiteral = Field(..., description="Echoed verdict from VerificationResult.")
