@@ -52,3 +52,19 @@ score well below 0.8 so a human reviews it.
 - If the image is not a ledger or is fully illegible, return "entries": [] and explain in "notes".
 
 Output the JSON object and nothing else."""
+
+
+# ── VERIFICATION AGENT ───────────────────────────────────────────────────────
+# NOTE: the verification CHECKS (math, plausibility, completeness, confidence)
+# are pure Python — no LLM is involved. The ONLY LLM call the Verification Agent
+# can make is asking the Vision Agent to RE-READ a page it believes was misread.
+# This constant is the correction feedback appended to the vision prompt on that
+# one bounded retry. "{feedback}" is filled with the specific, concrete problem.
+VERIFICATION_CORRECTION_PROMPT = """A verification pass on your previous reading of this page found a problem:
+
+{feedback}
+
+Re-read the page CAREFULLY from the image and return the corrected JSON in the same shape as before.
+Pay extra attention to the specific problem above — re-check ambiguous digits and re-add the amounts.
+Do NOT invent values to make totals match: if a line is genuinely unreadable, keep a LOW confidence and \
+say so in "notes". An honest flag is better than a confident guess."""

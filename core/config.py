@@ -25,6 +25,27 @@ MAX_VISION_RETRIES = int(os.getenv("MAX_VISION_RETRIES", "2"))
 # quotas reset per-minute, so ~62s matches the window.
 KEY_COOLDOWN_SECONDS = float(os.getenv("KEY_COOLDOWN_SECONDS", "62.0"))
 
+# ── Verification / audit policy (Phase 2) ────────────────────────────────────
+# The Verification Agent AUDITS a PageExtraction — it flags problems, it never
+# silently rewrites data. These constants tune what counts as a problem.
+#
+# How many times the agent may ask the Vision Agent to re-read a page it
+# believes was misread. Bounded to prevent loops / burning free-tier quota.
+MAX_VERIFICATION_RETRIES = int(os.getenv("MAX_VERIFICATION_RETRIES", "1"))
+# An amount above this (₹10 lakh) is implausible for a single khata line and
+# gets flagged for human review.
+MAX_PLAUSIBLE_AMOUNT = float(os.getenv("MAX_PLAUSIBLE_AMOUNT", "1000000.0"))
+# Written-vs-computed total gaps at or below this (rupees) are rounding noise,
+# not a real mismatch.
+MATH_MISMATCH_TOLERANCE = float(os.getenv("MATH_MISMATCH_TOLERANCE", "1.0"))
+# A math mismatch only triggers a re-extraction when the gap exceeds this
+# fraction of the written total (e.g. 0.2 = the sum is off by >20%). A small
+# gap is flagged but not worth spending a re-read on.
+MATH_MISMATCH_REL_TRIGGER = float(os.getenv("MATH_MISMATCH_REL_TRIGGER", "0.2"))
+# If at least this fraction of entries are below the confidence threshold, the
+# page was likely misread as a whole and is worth one re-extraction.
+LOW_CONF_FRACTION_TRIGGER = float(os.getenv("LOW_CONF_FRACTION_TRIGGER", "0.5"))
+
 # ── Demo safety ──────────────────────────────────────────────────────────────
 # When set to "1" (or when no GEMINI key exists) the vision agent returns a
 # canned extraction so the CLI/UI run fully offline. Always flagged degraded.

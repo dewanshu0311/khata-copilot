@@ -126,11 +126,18 @@ def _configure_model(genai):
     return model, api_key
 
 
-def extract_page(image_path: str) -> PageExtraction:
+def extract_page(image_path: str, correction_feedback: Optional[str] = None) -> PageExtraction:
     """Read a handwritten khata page into a validated PageExtraction.
 
     Always returns a PageExtraction — on unrecoverable failure it is flagged
     degraded with an error message, never an exception, so the demo survives.
+
+    correction_feedback: optional text from the Verification Agent (Phase 2)
+        describing a problem it found (e.g. a math mismatch). When present it is
+        appended to the extraction prompt as a targeted re-read hint. Defaults to
+        None so all existing callers are unaffected. In mock mode it changes
+        nothing (the canned page is returned regardless), which is exactly what
+        lets the self-correction loop terminate instead of looping forever.
     """
     if mock_mode_enabled():
         return _mock_extraction(image_path, reason="KHATA_MOCK=1")
@@ -153,6 +160,12 @@ def extract_page(image_path: str) -> PageExtraction:
 
     generation_config = {"temperature": 0.1, "response_mime_type": "application/json"}
     prompt = prompts.VISION_EXTRACTION_PROMPT
+    if correction_feedback:
+        # A targeted re-read requested by the Verification Agent's self-correction
+        # loop. Appended so the base honesty contract still applies.
+        prompt += "\n\n" + prompts.VERIFICATION_CORRECTION_PROMPT.format(
+            feedback=correction_feedback
+        )
     last_error: Optional[str] = None
 
     model, api_key = _configure_model(genai)
