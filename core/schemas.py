@@ -360,3 +360,50 @@ class InsightAnswer(BaseModel):
     hit_ids: List[int] = Field(
         default_factory=list, description="Entry row ids retrieved (for UI highlighting)."
     )
+
+
+# ── Reminder (Phase 5) ───────────────────────────────────────────────────────
+# The Reminder Agent drafts copy-paste-ready payment reminders. The amount
+# always comes from get_all_balances() (deterministic SQL) — the LLM only
+# phrases the message, exactly like the Insights Agent's number discipline.
+
+ReminderSourceLiteral = Literal["llm", "template"]
+
+
+class ReminderDraft(BaseModel):
+    """A drafted reminder message for one customer with an outstanding balance."""
+
+    customer_name: str = Field(..., description="Customer display name.")
+    amount: float = Field(..., description="Exact outstanding balance (from get_all_balances()).")
+    message: str = Field(..., description="The drafted bilingual (Hindi/English) reminder text.")
+    source: ReminderSourceLiteral = Field(
+        ..., description="'llm' if Groq drafted it, 'template' if it used the fixed fallback."
+    )
+    degraded: bool = Field(
+        False, description="True when the template fallback was used (no LLM available)."
+    )
+    since_date: Optional[str] = Field(
+        None, description="Raw date string of the earliest unpaid entry found, if any."
+    )
+
+
+# ── Orchestrator (Phase 5) ───────────────────────────────────────────────────
+# core/orchestrator.py runs Vision -> Verification -> Ledger for one photographed
+# page and returns this summary. Every stage is best-effort: a failure is
+# recorded in stage_errors, never raised, so the pipeline always returns.
+
+class PageResult(BaseModel):
+    """End-to-end result of running one page through the sequential pipeline."""
+
+    source_image: str = Field(..., description="Path/filename of the processed photo.")
+    extraction: PageExtraction = Field(..., description="Vision Agent output (possibly degraded).")
+    verification: VerificationResult = Field(..., description="Verification Agent's audit.")
+    ingest: Optional[IngestSummary] = Field(
+        None, description="Ledger ingest summary, or null if ingest could not run."
+    )
+    degraded: bool = Field(
+        False, description="True if any stage ran in a degraded/fallback mode."
+    )
+    stage_errors: List[str] = Field(
+        default_factory=list, description="One message per stage that failed or degraded."
+    )

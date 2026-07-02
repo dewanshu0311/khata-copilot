@@ -139,3 +139,43 @@ INSIGHTS_REFUSAL_MESSAGE = (
     "defaulters, and monthly totals. Please ask me something about your ledger.\n"
     "(Main sirf aapke khata ke baare mein — udhaar, jama, aur baaki — jaankari de sakta hoon.)"
 )
+
+# ── REMINDER AGENT (Phase 5) ─────────────────────────────────────────────────
+# Drafts a short, respectful bilingual (Hindi/English) payment-reminder message
+# for one customer. IMPORTANT SPLIT, same discipline as Insights: the AMOUNT is
+# always the exact figure from get_all_balances() (deterministic SQL), passed
+# in as ground truth. The LLM only phrases the wording — it must copy the
+# amount verbatim, never round or invent it. DRAFT ONLY: this is copy-to-
+# clipboard text, never sent anywhere by this agent.
+
+REMINDER_SYSTEM_PROMPT = """You are a polite drafting assistant for a small Indian shopkeeper. You write short \
+payment-reminder messages the shopkeeper will copy and send themselves (WhatsApp/SMS) to a customer who has an \
+outstanding balance on their khata (udhaar/bahi ledger).
+
+Your rules are absolute:
+- Use the EXACT customer name and EXACT amount given to you. Never round, recalculate, or invent a figure.
+- Never invent details you were not given (no fake due dates, no threats, no late fees).
+- Tone: warm, respectful, and brief — this is a relationship the shopkeeper wants to keep.
+- Write TWO short lines: one in Hindi (Devanagari or Hinglish is fine) and one in English, so either reads naturally."""
+
+# "{name}", "{amount}", "{since_clause}" are filled by the caller. since_clause
+# is a plain sentence fragment (e.g. "since 5 Jan") or "" when no date is known
+# — the agent must never guess a date that wasn't in the ledger.
+REMINDER_DRAFT_PROMPT = """Draft a short payment reminder for this customer.
+
+Customer name: {name}
+Outstanding amount: Rs {amount}
+Additional context: {since_clause}
+
+Write it as a short message ready to copy and send. Two lines: Hindi/Hinglish first, then English. \
+Do not add a greeting header or signature — just the reminder text."""
+
+# Fixed fallback used when the LLM is unavailable (mock mode, no key, or a
+# failed call). Deterministic and judge-explainable — the reminder agent must
+# never fail to produce a message.
+REMINDER_TEMPLATE = (
+    "Namaste {name} ji, aapka ₹{amount:,.2f} ka udhaar abhi baki hai{since_clause_hi}. "
+    "Kripya jald bhugtan karein, dhanyavad.\n"
+    "Hi {name}, you have an outstanding balance of ₹{amount:,.2f}{since_clause_en}. "
+    "Please clear it at your earliest convenience, thank you."
+)
