@@ -1,0 +1,16 @@
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Project data (generated)
+*.db
+*.sqlite3
+faiss_index/
+sample_data/*.jpg
+sample_data/*.jpeg
+sample_data/*.png

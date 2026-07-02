@@ -1,0 +1,164 @@
+"""
+Pydantic v2 schemas — the strict typing gate between agents.
+
+Modeling style ported from project-overwatch/main_workflow/schemas.py:
+  - Field(..., description=...) so the schema self-documents.
+  - @field_validator(mode="before") to normalize messy LLM/OCR input.
+  - @model_validator(mode="after") for cross-field defaults.
+  - confidence as float in [0, 1].
+
+Design decision (Phase 1, confirmed): amount is a float (rupees) and date is
+the RAW string the model read. We do NOT parse dates or do exact-money math
+here — the Verification Agent (Phase 2) audits and flags. Vision's job is to
+report honestly, including how unsure it is.
+"""
+from __future__ import annotations
+
+import re
+from typing import List, Literal, Optional
+
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+# Status tokens a shopkeeper might write, in Hindi (Latin + Devanagari) and
+# English. Everything else falls through to "unknown" so it gets flagged.
+_PAID_TOKENS = {
+    "paid", "p", "pd", "cleared", "clear", "done", "received", "recd", "settled",
+    "jama", "jma", "जमा", "chukta", "chuka", "चुकता", "ok", "✓", "✔",
+}
+_UNPAID_TOKENS = {
+    "unpaid", "u", "due", "pending", "owes", "owe", "baki", "baaki", "बाकी",
+    "udhaar", "udhar", "उधार", "udhaari", "credit", "cr", "balance", "left",
+}
+
+StatusLiteral = Literal["paid", "unpaid", "unknown"]
+
+
+def _to_float_amount(value) -> float:
+    """Coerce a messy amount (₹1,200/-, 'Rs 500', 1200.0) into a float.
+
+    Tolerant by design: an unparseable amount becomes 0.0 rather than raising,
+    so one bad row never discards a whole page. The Verification Agent flags
+    zero/implausible amounts downstream.
+    """
+    if value is None:
+        return 0.0
+    if isinstance(value, (int, float)):
+        return float(value)
+    # Grab the first number: optional leading minus, digits with optional
+    # thousands/lakh commas, optional decimals. This correctly ignores ₹, "Rs",
+    # and a trailing "/-" (Indian rupee notation) that a naive strip would keep.
+    match = re.search(r"-?\d[\d,]*(?:\.\d+)?", str(value))
+    if not match:
+        return 0.0
+    try:
+        return float(match.group(0).replace(",", ""))
+    except ValueError:
+        return 0.0
+
+
+class LedgerEntry(BaseModel):
+    """One customer line from a khata page."""
+
+    name: str = Field(..., description="Customer name exactly as written.")
+    amount: float = Field(..., description="Transaction amount in rupees.")
+    date: Optional[str] = Field(
+        None, description="Date exactly as written on the page (raw string), or null if absent."
+    )
+    status: StatusLiteral = Field(
+        "unknown", description="'paid', 'unpaid', or 'unknown' if not legible."
+    )
+    confidence: float = Field(
+        ..., ge=0.0, le=1.0,
+        description="How sure the reader is about THIS entry, 0-1. Be honest; low is fine.",
+    )
+    raw_text: str = Field(
+        "", description="The original line text as read, for human cross-checking."
+    )
+
+    @field_validator("name", "raw_text", mode="before")
+    @classmethod
+    def _clean_text(cls, value):
+        return re.sub(r"\s+", " ", str(value or "")).strip()
+
+    @field_validator("amount", mode="before")
+    @classmethod
+    def _normalize_amount(cls, value):
+        return _to_float_amount(value)
+
+    @field_validator("date", mode="before")
+    @classmethod
+    def _normalize_date(cls, value):
+        text = re.sub(r"\s+", " ", str(value or "")).strip()
+        return text or None
+
+    @field_validator("status", mode="before")
+    @classmethod
+    def _normalize_status(cls, value):
+        token = str(value or "").strip().lower()
+        if token in _PAID_TOKENS:
+            return "paid"
+        if token in _UNPAID_TOKENS:
+            return "unpaid"
+        if token in ("paid", "unpaid", "unknown"):
+            return token
+        return "unknown"
+
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def _normalize_confidence(cls, value):
+        try:
+            c = float(value)
+        except (TypeError, ValueError):
+            return 0.0
+        if c > 1.0:  # model gave a percentage like 85
+            c = c / 100.0
+        return max(0.0, min(1.0, c))
+
+
+class PageExtraction(BaseModel):
+    """The Vision Agent's full output for a single photographed page."""
+
+    source_image: str = Field(..., description="Path/filename of the source photo.")
+    entries: List[LedgerEntry] = Field(
+        default_factory=list, description="All ledger lines read from the page."
+    )
+    written_total: Optional[float] = Field(
+        None, description="A total figure written on the page itself, if any (for math auditing)."
+    )
+    overall_confidence: float = Field(
+        0.0, ge=0.0, le=1.0, description="Aggregate confidence for the whole page."
+    )
+    notes: str = Field(
+        "", description="Reader notes: illegible regions, ambiguity, assumptions."
+    )
+    degraded: bool = Field(
+        False, description="True when this came from mock mode or a failed/partial extraction."
+    )
+    error: Optional[str] = Field(
+        None, description="Populated when extraction failed; the pipeline stays alive."
+    )
+
+    @field_validator("written_total", mode="before")
+    @classmethod
+    def _normalize_written_total(cls, value):
+        if value is None or value == "":
+            return None
+        return _to_float_amount(value)
+
+    @model_validator(mode="after")
+    def _default_overall_confidence(self):
+        # If the model didn't supply a page-level score, derive it from entries.
+        if not self.overall_confidence and self.entries:
+            self.overall_confidence = round(
+                sum(e.confidence for e in self.entries) / len(self.entries), 3
+            )
+        return self
+
+    @property
+    def computed_total(self) -> float:
+        """Sum of entry amounts — compared against written_total by Verification."""
+        return round(sum(e.amount for e in self.entries), 2)
+
+    def flagged_entries(self, threshold: float) -> List[LedgerEntry]:
+        """Entries at or below the confidence threshold (need human review)."""
+        return [e for e in self.entries if e.confidence <= threshold]

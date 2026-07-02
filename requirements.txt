@@ -1,0 +1,24 @@
+# Khata Copilot — all free tier. Grouped by build phase so you can install
+# incrementally; installing everything at once is also fine.
+
+# ── Phase 1: schemas + vision agent + CLI ────────────────────────────────────
+google-generativeai>=0.8.0     # Gemini 2.0 Flash vision (free tier)
+pydantic>=2.6                  # validated schemas everywhere
+python-dotenv>=1.0             # .env loading (keys)
+pillow>=10.0                   # image loading for the vision agent
+rich>=13.0                     # pretty CLI tables / logs
+
+# ── Phase 2+: reasoning (verification, insights, reminders) ──────────────────
+groq>=0.11.0                   # llama-3.3-70b-versatile (free tier)
+
+# ── Phase 3: structured ledger ───────────────────────────────────────────────
+# sqlite3 is in the Python standard library — no dependency needed.
+
+# ── Phase 4: hybrid RAG search ───────────────────────────────────────────────
+sentence-transformers>=2.7     # SBERT all-MiniLM-L6-v2 (local embeddings)
+faiss-cpu>=1.8                 # dense vector index
+rank-bm25>=0.2.2               # sparse keyword scores for hybrid fusion
+numpy>=1.26                    # score fusion math
+
+# ── Phase 6: UI ──────────────────────────────────────────────────────────────
+streamlit>=1.36                # 4-tab app
