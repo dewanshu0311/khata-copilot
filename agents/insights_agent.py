@@ -1,0 +1,270 @@
+"""
+Insights Agent — answers a shopkeeper's plain-language questions about their ledger.
+
+Pipeline role (Phase 4): a question (+ the SQLite ledger) in -> a grounded,
+source-tagged InsightAnswer out.
+
+The design is deliberately split so money numbers can never be hallucinated:
+
+  1. DETERMINISTIC stats (total outstanding, top defaulters, monthly totals) are
+     computed straight from SQL by compute_stats(). No LLM ever touches them.
+  2. A tiny ROUTER answers the two unambiguous money questions ("total outstanding?",
+     "who owes the most?") directly from those stats — source="deterministic".
+  3. Everything else goes through RAG: a GUARDRAIL (out-of-scope questions are
+     politely refused), hybrid RETRIEVAL of the relevant entries, then Groq
+     generates an answer GROUNDED in those entries plus the exact pre-computed
+     totals (injected as authoritative context so it phrases numbers, never invents).
+  4. If Groq is unavailable (mock mode, no key, error) we fall back to an
+     EXTRACTIVE answer built from the retrieved entries — the demo never dies.
+
+Every InsightAnswer carries a `source` tag, so a grounded answer, a deterministic
+answer, a fallback, and a refusal never look alike.
+"""
+from __future__ import annotations
+
+import re
+from typing import Callable, List, Optional
+
+from core import prompts
+from core.config import SEARCH_TOP_K
+from core.db import (
+    get_all_balances,
+    get_all_entries,
+    get_entries_needing_review,
+    get_monthly_totals,
+)
+from core.groq_client import groq_chat
+from core.schemas import InsightAnswer, LedgerStats
+from core.search import LedgerSearchIndex, extractive_answer
+
+# A completion callable: (system, user, **kwargs) -> answer text or None. Defaults
+# to core.groq_client.groq_chat; injectable so tests run without real API calls.
+CompleteFn = Callable[..., Optional[str]]
+
+
+# ── Deterministic stats (pure SQL, never the LLM) ────────────────────────────
+def compute_stats(conn) -> LedgerStats:
+    """Summarize the ledger straight from the database. Every number is exact."""
+    balances = get_all_balances(conn)  # sorted desc, zero balances already excluded
+    return LedgerStats(
+        total_outstanding=round(sum(b.unpaid_total for b in balances), 2),
+        customer_count=len(balances),
+        total_entries=len(get_all_entries(conn)),
+        flagged_count=len(get_entries_needing_review(conn)),
+        top_defaulters=balances[:5],
+        monthly_totals=get_monthly_totals(conn),
+    )
+
+
+# ── Guardrail (rescoped from my Rag-Assistant-masterclass build) ─────────────
+# Clearly-out-of-scope topics. Kept narrow and non-overlapping with ledger words
+# so a real khata question is never caught here by accident.
+_OOS_PATTERNS = (
+    r"\b(weather|temperature|forecast|barish|mausam)\b",
+    r"\b(capital of|president|prime minister|population of|who invented|when did)\b",
+    r"\b(joke|shayari|poem|kavita|recipe|movie|film|song|gaana|kahani)\b",
+    r"\b(cricket|football|ipl|world ?cup|kohli|messi)\b",
+    r"\b(write|create|generate|debug|fix)\b.*\b(code|program|script|python|java|sql|html|essay)\b",
+    r"\b\d+\s*[\+\-\*x/]\s*\d+\b",  # arithmetic puzzle, e.g. "2+2"
+    r"\b(stock price|bitcoin|crypto|sensex|nifty|share market)\b",
+)
+# Ledger vocabulary (Latin + Devanagari) that marks a question as in-scope.
+_IN_SCOPE_HINTS = (
+    "udhaar", "udhar", "उधार", "baki", "baaki", "बाकी", "jama", "जमा",
+    "owe", "owes", "owed", "due", "dues", "pending", "paid", "unpaid",
+    "balance", "outstanding", "total", "kitna", "kitni", "kitne", "kaun", "kis",
+    "customer", "grahak", "ग्राहक", "khata", "ledger", "payment", "paisa",
+    "rupay", "rupaye", "₹", "defaulter", "month", "mahina", "महीना",
+    "sabse", "zyada", "how much", "how many", "who ", "amount", "list",
+)
+
+
+def _matches_any(text: str, patterns) -> bool:
+    return any(re.search(p, text) for p in patterns)
+
+
+def _local_guardrail(question: str, known_names: List[str]) -> Optional[bool]:
+    """Fast, no-LLM scope check. True=in, False=out, None=undecided (ask the LLM)."""
+    text = question.lower()
+    if _matches_any(text, _OOS_PATTERNS):
+        return False
+    if any(hint in text for hint in _IN_SCOPE_HINTS):
+        return True
+    if any(name and name.lower() in text for name in known_names):
+        return True
+    return None
+
+
+def _classify_scope(question: str, complete_fn: CompleteFn) -> Optional[bool]:
+    """LLM scope classifier. Returns True/False, or None when the LLM is unavailable."""
+    raw = complete_fn(
+        "You are a precise scope classifier. Reply with exactly one word.",
+        prompts.INSIGHTS_GUARDRAIL_PROMPT.format(question=question),
+        max_tokens=8,
+    )
+    if not raw:
+        return None
+    verdict = raw.strip().upper()
+    if "OUT_OF_SCOPE" in verdict:  # check OUT first — "IN_SCOPE" is a substring of it
+        return False
+    if "IN_SCOPE" in verdict:
+        return True
+    return None
+
+
+def _is_in_scope(question: str, known_names: List[str], complete_fn: CompleteFn) -> bool:
+    """Two-tier guardrail: local keywords first, then the LLM only if still unsure."""
+    local = _local_guardrail(question, known_names)
+    if local is not None:
+        return local
+    verdict = _classify_scope(question, complete_fn)  # None if no LLM (mock/offline)
+    if verdict is not None:
+        return verdict
+    # No clear signal and no LLM to arbitrate: lean permissive so an offline/mock
+    # demo still answers from the ledger. A clear OOS pattern already refused above.
+    return True
+
+
+# ── Deterministic mini-router (keeps the money numbers off the LLM path) ─────
+_TOTAL_PATTERNS = (
+    r"\btotal\b.*\b(outstanding|due|owed|udhaar|udhar|baki|baaki|pending|balance)\b",
+    r"\b(outstanding|udhaar|udhar|baki|baaki)\b.*\btotal\b",
+    r"\bhow much\b.*\b(total|outstanding|altogether|in all)\b",
+    r"\b(kitna|kitni|kitne)\b.*\b(total|udhaar|udhar|baki|baaki)\b",
+)
+_TOP_PATTERNS = (
+    r"\b(top|biggest|largest|highest)\b.*\b(defaulter|debtor|borrower)\b",
+    r"\bwho\b.*\bowes?\b.*\b(most|the most|highest|maximum)\b",
+    r"\b(sabse zyada|sabse bada)\b.*\b(udhaar|udhar|baki|baaki)\b",
+    r"\bkaun\b.*\bsabse zyada\b",
+)
+
+
+def _deterministic_router(question: str, stats: LedgerStats) -> Optional[InsightAnswer]:
+    """Answer the two unambiguous money questions straight from SQL-computed stats.
+
+    Returns None for anything nuanced, which then flows to RAG+LLM. Deterministic
+    answers are templated English; a nuanced Hindi question instead goes to the LLM
+    (which still receives these exact totals as ground truth, so numbers stay honest).
+    """
+    text = question.lower()
+    if _matches_any(text, _TOTAL_PATTERNS):
+        answer = (
+            f"Your customers owe you ₹{stats.total_outstanding:,.2f} in total, across "
+            f"{stats.customer_count} customer(s) with a pending balance."
+        )
+        return InsightAnswer(question=question, answer=answer, source="deterministic")
+    if _matches_any(text, _TOP_PATTERNS):
+        if not stats.top_defaulters:
+            return InsightAnswer(
+                question=question, answer="No customer currently has an outstanding balance.",
+                source="deterministic",
+            )
+        top = stats.top_defaulters[0]
+        others = stats.top_defaulters[1:3]
+        tail = ""
+        if others:
+            tail = " Next: " + ", ".join(f"{d.name} (₹{d.unpaid_total:,.0f})" for d in others) + "."
+        answer = f"{top.name} owes you the most, at ₹{top.unpaid_total:,.2f}.{tail}"
+        return InsightAnswer(
+            question=question, answer=answer, source="deterministic",
+            citations=[f"{d.name}: ₹{d.unpaid_total:,.2f}" for d in stats.top_defaulters[:3]],
+        )
+    return None
+
+
+# ── RAG context formatting ───────────────────────────────────────────────────
+def _build_context(hits) -> str:
+    """Render retrieved entries as citation-tagged lines for the answer prompt."""
+    if not hits:
+        return "(no matching entries found)"
+    lines = []
+    for h in hits:
+        flag = " | FLAGGED: needs review" if h.record.needs_review else ""
+        lines.append(f"{h.citation()} | source image: {h.record.source_image}{flag}")
+    return "\n".join(lines)
+
+
+# ── Public entry point ───────────────────────────────────────────────────────
+def ask(
+    question: str,
+    conn,
+    *,
+    index: Optional[LedgerSearchIndex] = None,
+    complete_fn: Optional[CompleteFn] = None,
+    k: int = SEARCH_TOP_K,
+) -> InsightAnswer:
+    """Answer one question about the ledger. Always returns a tagged InsightAnswer."""
+    question = (question or "").strip()
+    if not question:
+        return InsightAnswer(
+            question="", answer="Please ask a question about your ledger.", source="empty",
+        )
+
+    complete_fn = complete_fn or groq_chat
+    stats = compute_stats(conn)
+    known_names = [d.name for d in stats.top_defaulters]
+
+    # 1) Guardrail — refuse out-of-scope questions politely.
+    if not _is_in_scope(question, known_names, complete_fn):
+        return InsightAnswer(
+            question=question, answer=prompts.INSIGHTS_REFUSAL_MESSAGE,
+            source="guardrail_refusal", is_blocked=True,
+        )
+
+    # 2) Deterministic router — money numbers answered without the LLM.
+    routed = _deterministic_router(question, stats)
+    if routed is not None:
+        return routed
+
+    # 3) Retrieve relevant entries via hybrid search.
+    if index is None:
+        index = LedgerSearchIndex(get_all_entries(conn))
+    hits = index.search(question, k=k)
+    if not hits:
+        return InsightAnswer(
+            question=question,
+            answer="I couldn't find anything about that in your ledger yet.",
+            source="empty",
+        )
+    citations = [h.citation() for h in hits]
+    hit_ids = [h.record.id for h in hits]
+
+    # 4) Generate a grounded answer; fall back to extractive if the LLM is down.
+    user_prompt = prompts.INSIGHTS_ANSWER_PROMPT.format(
+        stats="\n".join(stats.headline_lines()),
+        context=_build_context(hits),
+        question=question,
+    )
+    answer = complete_fn(prompts.INSIGHTS_SYSTEM_PROMPT, user_prompt)
+    if answer:
+        return InsightAnswer(
+            question=question, answer=answer.strip(), source="llm",
+            citations=citations, hit_ids=hit_ids,
+        )
+    return InsightAnswer(
+        question=question, answer=extractive_answer(question, hits),
+        source="extractive_fallback", degraded=True, citations=citations, hit_ids=hit_ids,
+    )
+
+
+class InsightsAgent:
+    """Stateful convenience wrapper: builds the search index once, reuses it.
+
+    The Streamlit UI (Phase 6) holds one of these; call refresh_index() after new
+    pages are ingested. compute_stats() is exposed for the deterministic stat cards.
+    """
+
+    def __init__(self, conn, *, complete_fn: Optional[CompleteFn] = None, build_index: bool = True):
+        self.conn = conn
+        self.complete_fn = complete_fn or groq_chat
+        self.index = LedgerSearchIndex(get_all_entries(conn)) if build_index else None
+
+    def stats(self) -> LedgerStats:
+        return compute_stats(self.conn)
+
+    def refresh_index(self) -> None:
+        self.index = LedgerSearchIndex(get_all_entries(self.conn))
+
+    def ask(self, question: str) -> InsightAnswer:
+        return ask(question, self.conn, index=self.index, complete_fn=self.complete_fn)

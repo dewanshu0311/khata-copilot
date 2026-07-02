@@ -234,6 +234,17 @@ def get_entries_needing_review(conn: sqlite3.Connection) -> List[LedgerEntryReco
     return [_row_to_record(r) for r in rows]
 
 
+def get_all_entries(conn: sqlite3.Connection) -> List[LedgerEntryRecord]:
+    """Every stored ledger entry (newest first) — the corpus the Insights Agent searches."""
+    rows = conn.execute(
+        """SELECT e.id, c.display_name, e.amount, e.raw_date, e.status, e.confidence,
+                  e.raw_text, e.source_image, e.needs_review, e.scanned_at
+           FROM entries e JOIN customers c ON c.id = e.customer_id
+           ORDER BY e.id DESC"""
+    ).fetchall()
+    return [_row_to_record(r) for r in rows]
+
+
 def _parse_month(raw_date: str) -> str:
     if not raw_date:
         return "unknown"

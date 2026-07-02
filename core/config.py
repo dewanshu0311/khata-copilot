@@ -51,6 +51,26 @@ LOW_CONF_FRACTION_TRIGGER = float(os.getenv("LOW_CONF_FRACTION_TRIGGER", "0.5"))
 # every environment builds its own from scanned pages.
 DB_PATH = os.getenv("KHATA_DB_PATH", "khata.db")
 
+# ── Search + Insights (Phase 4) ──────────────────────────────────────────────
+# Local sentence-transformer used for dense semantic search over ledger entries.
+# all-MiniLM-L6-v2 is tiny (~90 MB), fast on CPU, and 384-dim — plenty for a few
+# hundred khata lines. Runs fully offline once downloaded.
+EMBEDDING_MODEL = os.getenv("KHATA_EMBEDDING_MODEL", "all-MiniLM-L6-v2")
+# Hybrid fusion weight: final = alpha*dense + (1-alpha)*sparse. Biased slightly
+# toward sparse/keyword (0.4) because in a small ledger the exact customer NAME
+# matters most; questions still get the semantic lift from the dense half.
+HYBRID_ALPHA = float(os.getenv("KHATA_HYBRID_ALPHA", "0.4"))
+# How many ledger entries the retriever feeds into an answer's context.
+SEARCH_TOP_K = int(os.getenv("KHATA_SEARCH_TOP_K", "5"))
+# Groq generation config for the Insights Agent. temperature=0.1 keeps answers
+# faithful to the retrieved numbers; a 512-token cap keeps them concise (matches
+# the proven config from the RAG masterclass build).
+GROQ_TEMPERATURE = float(os.getenv("KHATA_GROQ_TEMPERATURE", "0.1"))
+GROQ_MAX_TOKENS = int(os.getenv("KHATA_GROQ_MAX_TOKENS", "512"))
+# One automatic key-rotation retry on a Groq 429 before falling back to the
+# extractive (no-LLM) answer. Bounded so a rate-limit storm can't hang a demo.
+MAX_GROQ_RETRIES = int(os.getenv("KHATA_MAX_GROQ_RETRIES", "1"))
+
 # ── Demo safety ──────────────────────────────────────────────────────────────
 # When set to "1" (or when no GEMINI key exists) the vision agent returns a
 # canned extraction so the CLI/UI run fully offline. Always flagged degraded.

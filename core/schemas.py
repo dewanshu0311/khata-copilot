@@ -287,3 +287,76 @@ class IngestSummary(BaseModel):
     inserted: int = Field(0, description="Number of new entries inserted.")
     updated: int = Field(0, description="Number of existing entries updated (re-scan).")
     page_verdict: VerdictLiteral = Field(..., description="Echoed verdict from VerificationResult.")
+
+
+# ── Search + Insights (Phase 4) ──────────────────────────────────────────────
+# core/search.py returns LedgerSearchHits; agents/insights_agent.py returns a
+# LedgerStats (deterministic — no LLM ever touches these numbers) and an
+# InsightAnswer (the chat reply, tagged with HOW it was produced so nothing is
+# silently trusted — a hallucinated answer and a grounded one never look alike).
+
+AnswerSource = Literal[
+    "deterministic",        # answered straight from SQL aggregates — no LLM touched the number
+    "llm",                  # Groq generated a grounded answer from the retrieved entries
+    "extractive_fallback",  # LLM unavailable — sentences lifted verbatim from the entries
+    "guardrail_refusal",    # question was out of scope; politely declined
+    "empty",                # in scope, but the ledger has nothing relevant to say
+]
+
+
+class LedgerSearchHit(BaseModel):
+    """One entry returned by hybrid search, with its fused relevance score."""
+
+    record: LedgerEntryRecord = Field(..., description="The stored ledger entry that matched.")
+    score: float = Field(..., description="Fused hybrid score: alpha*dense + (1-alpha)*sparse.")
+    dense_score: float = Field(0.0, description="Semantic (SBERT/FAISS) component, normalized 0-1.")
+    sparse_score: float = Field(0.0, description="Keyword (BM25) component, normalized 0-1.")
+
+    def citation(self) -> str:
+        """Judge-readable reference to this exact entry, for grounded answers."""
+        r = self.record
+        date = f", {r.raw_date}" if r.raw_date else ""
+        return f"Entry #{r.id}: {r.customer_name} — ₹{r.amount:,.0f} {r.status}{date}"
+
+
+class LedgerStats(BaseModel):
+    """Deterministic ledger summary. Every number here comes straight from SQL —
+    the LLM never computes these, it only phrases them (the anti-hallucination core)."""
+
+    total_outstanding: float = Field(0.0, description="Sum of all unpaid/unknown balances.")
+    customer_count: int = Field(0, description="Customers with a non-zero outstanding balance.")
+    total_entries: int = Field(0, description="Total ledger entries stored.")
+    flagged_count: int = Field(0, description="Entries flagged needs_review by verification.")
+    top_defaulters: List[CustomerBalance] = Field(
+        default_factory=list, description="Highest outstanding balances, descending."
+    )
+    monthly_totals: List[MonthlyTotal] = Field(
+        default_factory=list, description="Per-month entry totals (best-effort date parsing)."
+    )
+
+    def headline_lines(self) -> List[str]:
+        """Authoritative facts block injected into the LLM prompt as ground truth."""
+        lines = [
+            f"Total outstanding across all customers: ₹{self.total_outstanding:,.2f}",
+            f"Customers with an outstanding balance: {self.customer_count}",
+            f"Total entries on record: {self.total_entries} ({self.flagged_count} flagged for review)",
+        ]
+        for i, d in enumerate(self.top_defaulters[:5], 1):
+            lines.append(f"Top defaulter #{i}: {d.name} owes ₹{d.unpaid_total:,.2f}")
+        return lines
+
+
+class InsightAnswer(BaseModel):
+    """The Insights Agent's reply to one question, tagged with how it was made."""
+
+    question: str = Field(..., description="The question asked.")
+    answer: str = Field(..., description="The answer text, in the user's language.")
+    source: AnswerSource = Field(..., description="How this answer was produced.")
+    is_blocked: bool = Field(False, description="True if the guardrail refused the question.")
+    degraded: bool = Field(False, description="True if produced without the LLM (fallback/mock).")
+    citations: List[str] = Field(
+        default_factory=list, description="Human-readable references to the entries used."
+    )
+    hit_ids: List[int] = Field(
+        default_factory=list, description="Entry row ids retrieved (for UI highlighting)."
+    )
