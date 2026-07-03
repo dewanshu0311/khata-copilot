@@ -203,6 +203,7 @@ IssueCode = Literal[
     "missing_name",        # name blank or literally "UNREADABLE"
     "missing_date",        # no date recorded
     "unknown_status",      # paid/unpaid could not be determined
+    "unknown_type",        # udhaar vs sale could not be determined -> excluded from both rollups
     "low_confidence",      # reader was unsure about this entry
     "degraded_extraction", # page came from mock/failed extraction
 ]

@@ -106,8 +106,12 @@ def _mock_extraction(image_path: str, reason: str) -> PageExtraction:
         "entries": [
             {"name": "Ramesh Kumar", "amount": 1200, "date": "5 Jan",
              "status": "unpaid", "confidence": 0.93, "raw_text": "Ramesh Kumar 1200 udhaar 5 Jan"},
+            # Retyped (Phase 8) from a udhaar/jama line to a completed CASH SALE, so
+            # the mock exercises the new sale axis (sale + paid = completed bill) in
+            # the Scan preview. Still 4 entries — the len==4 mock test stays alive.
             {"name": "Sita Devi", "amount": 450, "date": "6 Jan",
-             "status": "paid", "confidence": 0.88, "raw_text": "Sita Devi 450 jama 6 Jan"},
+             "status": "paid", "entry_type": "sale", "confidence": 0.88,
+             "raw_text": "Sita Devi 450 cash sale (bill) 6 Jan"},
             {"name": "Mohan", "amount": 800, "date": "6 Jan",
              "status": "unpaid", "confidence": 0.61, "raw_text": "Mohan 8?0 baki 6 Jan (digit unclear)"},
             {"name": "UNREADABLE", "amount": 0, "date": None,

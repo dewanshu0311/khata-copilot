@@ -75,6 +75,15 @@ def _audit_entries(page: PageExtraction, threshold: float) -> List[EntryIssue]:
                 message="Paid/unpaid status could not be determined.",
             ))
 
+        if entry.entry_type == "unknown":
+            # Info, not warning: an unclassified line is still stored honestly and
+            # is EXCLUDED from both the udhaar and the sales rollups (the two-axis
+            # honesty rule), but it's surfaced here so a human can classify it.
+            issues.append(EntryIssue(
+                entry_index=idx, entry_name=name, code="unknown_type", severity="info",
+                message="Type (udhaar vs sale) could not be determined — excluded from both totals until reviewed.",
+            ))
+
         if entry.confidence <= threshold:
             issues.append(EntryIssue(
                 entry_index=idx, entry_name=name, code="low_confidence", severity="warning",
