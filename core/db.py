@@ -31,6 +31,7 @@ from core.schemas import (
     LedgerEntryRecord,
     MonthlyTotal,
     PageExtraction,
+    SalesSummary,
     VerificationResult,
 )
 
@@ -59,6 +60,7 @@ CREATE TABLE IF NOT EXISTS entries (
     amount REAL NOT NULL,
     raw_date TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL,
+    entry_type TEXT NOT NULL DEFAULT 'udhaar',
     confidence REAL NOT NULL,
     raw_text TEXT NOT NULL DEFAULT '',
     needs_review INTEGER NOT NULL,
@@ -152,10 +154,10 @@ def ingest_page(
 
         if existing:
             conn.execute(
-                """UPDATE entries SET page_id=?, status=?, confidence=?, raw_text=?,
+                """UPDATE entries SET page_id=?, status=?, entry_type=?, confidence=?, raw_text=?,
                        needs_review=?, scanned_at=?
                    WHERE id=?""",
-                (page_id, entry.status, entry.confidence, entry.raw_text,
+                (page_id, entry.status, entry.entry_type, entry.confidence, entry.raw_text,
                  int(needs_review), now, existing[0]),
             )
             updated += 1
@@ -163,10 +165,11 @@ def ingest_page(
             conn.execute(
                 """INSERT INTO entries
                        (customer_id, page_id, source_image, amount, raw_date, status,
-                        confidence, raw_text, needs_review, scanned_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        entry_type, confidence, raw_text, needs_review, scanned_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (customer_id, page_id, page.source_image, entry.amount, raw_date,
-                 entry.status, entry.confidence, entry.raw_text, int(needs_review), now),
+                 entry.status, entry.entry_type, entry.confidence, entry.raw_text,
+                 int(needs_review), now),
             )
             inserted += 1
 
@@ -181,7 +184,7 @@ def _row_to_record(row: Sequence) -> LedgerEntryRecord:
     return LedgerEntryRecord(
         id=row[0], customer_name=row[1], amount=row[2], raw_date=row[3] or None,
         status=row[4], confidence=row[5], raw_text=row[6], source_image=row[7],
-        needs_review=bool(row[8]), scanned_at=row[9],
+        needs_review=bool(row[8]), scanned_at=row[9], entry_type=row[10],
     )
 
 
@@ -196,7 +199,8 @@ def get_customer_balance(conn: sqlite3.Connection, name: str) -> CustomerBalance
 
     customer_id, display_name = row
     entries = conn.execute(
-        "SELECT amount, status FROM entries WHERE customer_id = ?", (customer_id,)
+        "SELECT amount, status FROM entries WHERE customer_id = ? AND entry_type = 'udhaar'",
+        (customer_id,),
     ).fetchall()
     unpaid_total = round(sum(a for a, s in entries if s != "paid"), 2)
     paid_total = round(sum(a for a, s in entries if s == "paid"), 2)
@@ -211,7 +215,8 @@ def get_all_balances(conn: sqlite3.Connection) -> List[CustomerBalance]:
     balances = []
     for customer_id, display_name in conn.execute("SELECT id, display_name FROM customers"):
         entries = conn.execute(
-            "SELECT amount, status FROM entries WHERE customer_id = ?", (customer_id,)
+            "SELECT amount, status FROM entries WHERE customer_id = ? AND entry_type = 'udhaar'",
+            (customer_id,),
         ).fetchall()
         unpaid_total = round(sum(a for a, s in entries if s != "paid"), 2)
         if unpaid_total <= 0:
@@ -228,7 +233,7 @@ def get_all_balances(conn: sqlite3.Connection) -> List[CustomerBalance]:
 def get_entries_needing_review(conn: sqlite3.Connection) -> List[LedgerEntryRecord]:
     rows = conn.execute(
         """SELECT e.id, c.display_name, e.amount, e.raw_date, e.status, e.confidence,
-                  e.raw_text, e.source_image, e.needs_review, e.scanned_at
+                  e.raw_text, e.source_image, e.needs_review, e.scanned_at, e.entry_type
            FROM entries e JOIN customers c ON c.id = e.customer_id
            WHERE e.needs_review = 1"""
     ).fetchall()
@@ -239,8 +244,45 @@ def get_all_entries(conn: sqlite3.Connection) -> List[LedgerEntryRecord]:
     """Every stored ledger entry (newest first) — the corpus the Insights Agent searches."""
     rows = conn.execute(
         """SELECT e.id, c.display_name, e.amount, e.raw_date, e.status, e.confidence,
-                  e.raw_text, e.source_image, e.needs_review, e.scanned_at
+                  e.raw_text, e.source_image, e.needs_review, e.scanned_at, e.entry_type
            FROM entries e JOIN customers c ON c.id = e.customer_id
+           ORDER BY e.id DESC"""
+    ).fetchall()
+    return [_row_to_record(r) for r in rows]
+
+
+# ── Billing / Sales queries (Phase 8) ────────────────────────────────────────
+# Sale-type entries are reported SEPARATELY from udhaar credit. Totals are summed
+# in Python (never an LLM, never SQL SUM()) to match the rest of the ledger, and
+# 'unknown'-TYPE entries are excluded from this rollup exactly as they are from
+# the udhaar balances — an unclassified line is honestly counted in neither.
+
+def get_sales_summary(conn: sqlite3.Connection) -> SalesSummary:
+    """Deterministic summary of sale-type entries. Pending = sale + status not
+    'paid' (unknown STATUS counts as pending, same honesty rule as udhaar)."""
+    rows = conn.execute(
+        "SELECT amount, status FROM entries WHERE entry_type = 'sale'"
+    ).fetchall()
+    completed = [a for a, s in rows if s == "paid"]
+    pending = [a for a, s in rows if s != "paid"]
+    return SalesSummary(
+        total_sales=round(sum(a for a, _ in rows), 2),
+        completed_total=round(sum(completed), 2),
+        pending_total=round(sum(pending), 2),
+        sale_count=len(rows),
+        completed_count=len(completed),
+        pending_count=len(pending),
+    )
+
+
+def get_unpaid_invoices(conn: sqlite3.Connection) -> List[LedgerEntryRecord]:
+    """Pending invoices: sale-type entries not yet marked 'paid', reported apart
+    from udhaar reminders. 'unknown' STATUS is included — money not confirmed."""
+    rows = conn.execute(
+        """SELECT e.id, c.display_name, e.amount, e.raw_date, e.status, e.confidence,
+                  e.raw_text, e.source_image, e.needs_review, e.scanned_at, e.entry_type
+           FROM entries e JOIN customers c ON c.id = e.customer_id
+           WHERE e.entry_type = 'sale' AND e.status != 'paid'
            ORDER BY e.id DESC"""
     ).fetchall()
     return [_row_to_record(r) for r in rows]

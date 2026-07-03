@@ -32,6 +32,17 @@ _UNPAID_TOKENS = {
 
 StatusLiteral = Literal["paid", "unpaid", "unknown"]
 
+# ── Entry type: a SEPARATE axis from `status` (Phase 8, billing) ──────────────
+# `status` answers "is it settled?" (paid/unpaid). `entry_type` answers "what
+# KIND of line is this?" and never mixes with settlement state:
+#   - "udhaar":  credit the shopkeeper extended (the original khata).
+#   - "sale":    a bill / cash sale of goods.
+#   - "unknown": type couldn't be determined -> flagged for review and EXCLUDED
+#                from BOTH the udhaar and the sales rollups (the honesty rule).
+# Defaults to "udhaar" everywhere: every row that predates billing IS udhaar by
+# definition, so all existing data and queries keep their exact meaning.
+EntryTypeLiteral = Literal["udhaar", "sale", "unknown"]
+
 
 def _to_float_amount(value) -> float:
     """Coerce a messy amount (₹1,200/-, 'Rs 500', 1200.0) into a float.
@@ -66,6 +77,11 @@ class LedgerEntry(BaseModel):
     )
     status: StatusLiteral = Field(
         "unknown", description="'paid', 'unpaid', or 'unknown' if not legible."
+    )
+    entry_type: EntryTypeLiteral = Field(
+        "udhaar",
+        description="'udhaar' (credit given), 'sale' (bill/cash sale), or 'unknown'. "
+        "A SEPARATE axis from status; defaults to 'udhaar' (the pre-billing meaning).",
     )
     confidence: float = Field(
         ..., ge=0.0, le=1.0,
@@ -102,6 +118,16 @@ class LedgerEntry(BaseModel):
         if token in ("paid", "unpaid", "unknown"):
             return token
         return "unknown"
+
+    @field_validator("entry_type", mode="before")
+    @classmethod
+    def _normalize_entry_type(cls, value):
+        # Minimal in this phase: accept the three canonical literals, default
+        # anything empty/unrecognized to "udhaar". CHUNK 2 teaches the Vision
+        # prompt to emit the richer synonyms (baaki/jama -> udhaar, bill/cash ->
+        # sale); those canonical values already pass through here unchanged.
+        token = str(value or "").strip().lower()
+        return token if token in ("udhaar", "sale", "unknown") else "udhaar"
 
     @field_validator("confidence", mode="before")
     @classmethod
@@ -265,6 +291,9 @@ class LedgerEntryRecord(BaseModel):
     amount: float = Field(..., description="Transaction amount in rupees.")
     raw_date: Optional[str] = Field(None, description="Date exactly as written, or null.")
     status: StatusLiteral = Field(..., description="'paid', 'unpaid', or 'unknown'.")
+    entry_type: EntryTypeLiteral = Field(
+        "udhaar", description="'udhaar', 'sale', or 'unknown' — a separate axis from status."
+    )
     confidence: float = Field(..., description="Reader confidence for this entry, 0-1.")
     raw_text: str = Field("", description="Original line text as read.")
     source_image: str = Field(..., description="Source page image this entry came from.")
@@ -287,6 +316,27 @@ class IngestSummary(BaseModel):
     inserted: int = Field(0, description="Number of new entries inserted.")
     updated: int = Field(0, description="Number of existing entries updated (re-scan).")
     page_verdict: VerdictLiteral = Field(..., description="Echoed verdict from VerificationResult.")
+
+
+# ── Billing / Sales (Phase 8) ────────────────────────────────────────────────
+# Sales live on the `entry_type='sale'` axis, kept strictly separate from udhaar
+# credit. Like every other rollup these figures are summed in Python from raw SQL
+# rows (never an LLM, never SQL SUM()); 'unknown'-TYPE entries are excluded, so an
+# unclassified line is honestly counted in neither the sales nor the udhaar total.
+
+class SalesSummary(BaseModel):
+    """Deterministic summary of sale-type entries (billing), separate from udhaar."""
+
+    total_sales: float = Field(0.0, description="Sum of all sale-type entry amounts.")
+    completed_total: float = Field(
+        0.0, description="Completed sales (sale + status 'paid') — cash sales / cleared bills."
+    )
+    pending_total: float = Field(
+        0.0, description="Pending invoices (sale + status not 'paid'; unknown status counts here)."
+    )
+    sale_count: int = Field(0, description="Number of sale-type entries.")
+    completed_count: int = Field(0, description="Number of completed sales (status 'paid').")
+    pending_count: int = Field(0, description="Number of pending invoices (status not 'paid').")
 
 
 # ── Search + Insights (Phase 4) ──────────────────────────────────────────────
