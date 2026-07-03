@@ -27,6 +27,7 @@ from core.config import DB_PATH
 from core.schemas import (
     CustomerBalance,
     IngestSummary,
+    LedgerEntry,
     LedgerEntryRecord,
     MonthlyTotal,
     PageExtraction,
@@ -254,6 +255,59 @@ def _parse_month(raw_date: str) -> str:
         except ValueError:
             continue
     return "unknown"
+
+
+# ── Demo data (Phase 7) ──────────────────────────────────────────────────────
+# A small, fixed set of clean entries so a judge demo of Insights/Reminders
+# doesn't depend on a live Gemini/Groq call or accumulated scan clutter. Goes
+# through the same ingest_page() path as a real scan (verdict "accept", no
+# issues) rather than raw SQL, so it stays consistent with real data shape.
+_DEMO_PAGES: list[tuple[str, list[dict]]] = [
+    ("demo_page_1.jpg", [
+        {"name": "Ramesh Kumar", "amount": 1200.0, "date": "5 Jan", "status": "unpaid", "confidence": 0.95, "raw_text": "Ramesh Kumar 1200 udhaar 5 Jan"},
+        {"name": "Sita Devi", "amount": 450.0, "date": "6 Jan", "status": "paid", "confidence": 0.92, "raw_text": "Sita Devi 450 jama 6 Jan"},
+        {"name": "Mohan Lal", "amount": 3200.0, "date": "8 Jan", "status": "unpaid", "confidence": 0.9, "raw_text": "Mohan Lal 3200 baki 8 Jan"},
+    ]),
+    ("demo_page_2.jpg", [
+        {"name": "Anita Sharma", "amount": 800.0, "date": "10 Jan", "status": "unpaid", "confidence": 0.88, "raw_text": "Anita Sharma 800 udhaar 10 Jan"},
+        {"name": "Ramesh Kumar", "amount": 600.0, "date": "15 Jan", "status": "paid", "confidence": 0.94, "raw_text": "Ramesh Kumar 600 jama 15 Jan"},
+        {"name": "Mohan Lal", "amount": 1500.0, "date": "18 Jan", "status": "unknown", "confidence": 0.55, "raw_text": "Mohan Lal 1500 ? 18 Jan"},
+    ]),
+]
+
+
+def clear_all(conn: sqlite3.Connection) -> None:
+    """Wipe every ledger table. Used by 'Load Demo Data' to start from a clean slate."""
+    conn.executescript("DELETE FROM entries; DELETE FROM pages; DELETE FROM customers;")
+    conn.commit()
+
+
+def seed_demo_data(conn: sqlite3.Connection) -> IngestSummary:
+    """Clear the ledger and load a fixed, known-good set of demo entries.
+
+    Lets a judge demo run Insights/Reminders instantly without a real scan.
+    """
+    clear_all(conn)
+    total_inserted = total_updated = 0
+    for source_image, raw_entries in _DEMO_PAGES:
+        entries = [LedgerEntry(**e) for e in raw_entries]
+        page = PageExtraction(
+            source_image=source_image, entries=entries,
+            overall_confidence=sum(e.confidence for e in entries) / len(entries),
+            notes="Demo data (Load Demo Data button) — not a real scan.",
+        )
+        verification = VerificationResult(
+            source_image=source_image, verdict="accept",
+            overall_confidence=page.overall_confidence,
+            computed_total=sum(e.amount for e in entries),
+        )
+        summary = ingest_page(conn, page, verification)
+        total_inserted += summary.inserted
+        total_updated += summary.updated
+    return IngestSummary(
+        source_image="demo_data", inserted=total_inserted, updated=total_updated,
+        page_verdict="accept",
+    )
 
 
 def get_monthly_totals(conn: sqlite3.Connection) -> List[MonthlyTotal]:

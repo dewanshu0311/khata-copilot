@@ -12,8 +12,8 @@ Theme adapted from the user's own Rag-Assistant-masterclass/zyro-rag-challenge
 """
 from __future__ import annotations
 
+import hashlib
 import sys
-import uuid
 from pathlib import Path
 
 import pandas as pd
@@ -314,6 +314,16 @@ with st.sidebar:
             '<span class="source-chip chip-deterministic">🟢 Live mode</span>', unsafe_allow_html=True,
         )
     st.markdown('<div class="custom-divider"></div>', unsafe_allow_html=True)
+    st.markdown("#### Demo")
+    if st.button("🎬 Load Demo Data", help="Clears the ledger and loads a fixed, known-good set of entries."):
+        db.seed_demo_data(get_conn())
+        refresh_insights()
+        st.session_state.pop("last_scan", None)
+        st.session_state.pop("reminders", None)
+        st.session_state["chat_history"] = []
+        st.success("Demo data loaded.")
+        st.rerun()
+    st.markdown('<div class="custom-divider"></div>', unsafe_allow_html=True)
     st.markdown("#### How it works")
     st.markdown(
         "- **Scan**: photo → Vision → Verification → Ledger\n"
@@ -349,15 +359,29 @@ with tab_scan:
     scan_clicked = st.button("🔍 Scan Page", type="primary", disabled=uploaded is None)
 
     if scan_clicked and uploaded is not None:
-        dest = UPLOAD_DIR / f"{uuid.uuid4().hex}_{uploaded.name}"
-        dest.write_bytes(uploaded.getvalue())
+        content = uploaded.getvalue()
+        # Hash the bytes (not a random UUID) so re-uploading the SAME photo in
+        # mock mode reuses the SAME source_image — the db's ON CONFLICT dedup
+        # then updates the existing rows instead of piling up duplicates.
+        content_hash = hashlib.sha256(content).hexdigest()[:16]
+        suffix = Path(uploaded.name).suffix or ".jpg"
+        dest = UPLOAD_DIR / f"{content_hash}{suffix}"
+        if not dest.exists():
+            dest.write_bytes(content)
         with st.spinner("Running Vision → Verification → Ledger..."):
             st.session_state["last_scan"] = process_page(str(dest), conn)
+            st.session_state["last_scan_image"] = dest
         refresh_insights()
 
     last_scan = st.session_state.get("last_scan")
     if last_scan is not None:
-        render_scan_result(last_scan)
+        preview_col, result_col = st.columns([1, 2])
+        with preview_col:
+            last_scan_image = st.session_state.get("last_scan_image")
+            if last_scan_image is not None and Path(last_scan_image).exists():
+                st.image(str(last_scan_image), caption="Scanned page", use_container_width=True)
+        with result_col:
+            render_scan_result(last_scan)
     else:
         st.info("Upload a khata photo and click Scan to see extraction results here.")
 

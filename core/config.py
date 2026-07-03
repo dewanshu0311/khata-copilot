@@ -13,6 +13,11 @@ import os
 # Gemini handles handwriting vision; Groq handles later reasoning phases.
 GEMINI_VISION_MODEL = os.getenv("GEMINI_VISION_MODEL", "gemini-2.0-flash")
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+# Vision-capable Groq model, used ONLY as a fallback when Gemini is unavailable
+# or quota-exhausted (Phase 7). Groq vision is honestly weaker on messy
+# handwriting than Gemini — it's a "keep the demo alive" fallback, not a
+# replacement.
+GROQ_VISION_MODEL = os.getenv("GROQ_VISION_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
 
 # ── Confidence / review policy ───────────────────────────────────────────────
 # Entries at or below this confidence get flagged for one-tap human review in
