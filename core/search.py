@@ -31,14 +31,18 @@ from core.schemas import LedgerEntryRecord, LedgerSearchHit
 
 # ── Text building + tokenizing ───────────────────────────────────────────────
 def build_entry_text(record: LedgerEntryRecord) -> str:
-    """The searchable string for one entry: name + amount + status + date (+ raw).
+    """The searchable string for one entry: name + amount + status + type + date (+ raw).
 
     The amount is rendered plain (no ₹/commas) so a query like "1200" tokenizes to
     a clean "1200" that BM25 can match; the pretty ₹-formatted form lives only in
-    the human-facing citation (see LedgerSearchHit.citation).
+    the human-facing citation (see LedgerSearchHit.citation). entry_type ("udhaar"/
+    "sale"/"unknown") is included so a sales query can retrieve sale entries.
     """
     amount = f"{record.amount:g}"
-    parts = [record.customer_name, f"₹{amount}", record.status, record.raw_date or ""]
+    parts = [
+        record.customer_name, f"₹{amount}", record.status,
+        record.entry_type, record.raw_date or "",
+    ]
     if record.raw_text:
         parts.append(record.raw_text)
     return " ".join(p for p in parts if p).strip()

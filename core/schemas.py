@@ -374,16 +374,30 @@ class LedgerStats(BaseModel):
     """Deterministic ledger summary. Every number here comes straight from SQL —
     the LLM never computes these, it only phrases them (the anti-hallucination core)."""
 
-    total_outstanding: float = Field(0.0, description="Sum of all unpaid/unknown balances.")
-    customer_count: int = Field(0, description="Customers with a non-zero outstanding balance.")
-    total_entries: int = Field(0, description="Total ledger entries stored.")
+    total_outstanding: float = Field(
+        0.0, description="Sum of unpaid/unknown UDHAAR (credit) balances. Sales are tracked separately."
+    )
+    customer_count: int = Field(0, description="Customers with a non-zero outstanding udhaar balance.")
+    total_entries: int = Field(0, description="Total ledger entries stored (all types).")
     flagged_count: int = Field(0, description="Entries flagged needs_review by verification.")
     top_defaulters: List[CustomerBalance] = Field(
-        default_factory=list, description="Highest outstanding balances, descending."
+        default_factory=list, description="Highest outstanding udhaar balances, descending."
     )
     monthly_totals: List[MonthlyTotal] = Field(
         default_factory=list, description="Per-month entry totals (best-effort date parsing)."
     )
+    # ── Billing / sales axis (Phase 8) — computed in Python, never the LLM ──
+    total_sales: float = Field(0.0, description="Sum of all sale-type entry amounts (completed + pending).")
+    sales_this_month: float = Field(
+        0.0, description="Sale-type total whose date parses to the current calendar month (best-effort)."
+    )
+    unpaid_invoices_total: float = Field(
+        0.0, description="Pending invoices: sale-type entries not marked 'paid'."
+    )
+    unclassified_total: float = Field(
+        0.0, description="Total amount of unknown-TYPE entries — excluded from BOTH rollups (honesty rule)."
+    )
+    unclassified_count: int = Field(0, description="Number of unknown-TYPE entries awaiting classification.")
 
     def headline_lines(self) -> List[str]:
         """Authoritative facts block injected into the LLM prompt as ground truth."""
@@ -394,6 +408,21 @@ class LedgerStats(BaseModel):
         ]
         for i, d in enumerate(self.top_defaulters[:5], 1):
             lines.append(f"Top defaulter #{i}: {d.name} owes ₹{d.unpaid_total:,.2f}")
+        # Sales / billing facts (only when present, so a pure-udhaar ledger stays clean).
+        if self.total_sales:
+            received = round(self.total_sales - self.unpaid_invoices_total, 2)
+            lines.append(
+                f"Total sales recorded: ₹{self.total_sales:,.2f} "
+                f"(₹{received:,.2f} received, ₹{self.unpaid_invoices_total:,.2f} pending invoices)"
+            )
+        if self.sales_this_month:
+            lines.append(f"Sales this month: ₹{self.sales_this_month:,.2f}")
+        if self.unclassified_total:
+            plural = "y" if self.unclassified_count == 1 else "ies"
+            lines.append(
+                f"Unclassified entries (type unknown, in NEITHER total): "
+                f"₹{self.unclassified_total:,.2f} across {self.unclassified_count} entr{plural}"
+            )
         return lines
 
 

@@ -32,6 +32,8 @@ from core.db import (
     get_all_entries,
     get_entries_needing_review,
     get_monthly_totals,
+    get_sales_summary,
+    get_sales_this_month,
 )
 from core.groq_client import groq_chat
 from core.schemas import InsightAnswer, LedgerStats
@@ -44,15 +46,26 @@ CompleteFn = Callable[..., Optional[str]]
 
 # ── Deterministic stats (pure SQL, never the LLM) ────────────────────────────
 def compute_stats(conn) -> LedgerStats:
-    """Summarize the ledger straight from the database. Every number is exact."""
-    balances = get_all_balances(conn)  # sorted desc, zero balances already excluded
+    """Summarize the ledger straight from the database. Every number is exact —
+    the LLM never computes these. Udhaar credit and sales are separate axes:
+    total_outstanding is udhaar-only; the sales fields cover the billing axis;
+    unknown-TYPE entries are counted in neither (the honesty rule)."""
+    balances = get_all_balances(conn)  # udhaar-scoped, sorted desc, zero balances excluded
+    all_entries = get_all_entries(conn)
+    unclassified = [e for e in all_entries if e.entry_type == "unknown"]
+    sales = get_sales_summary(conn)
     return LedgerStats(
         total_outstanding=round(sum(b.unpaid_total for b in balances), 2),
         customer_count=len(balances),
-        total_entries=len(get_all_entries(conn)),
+        total_entries=len(all_entries),
         flagged_count=len(get_entries_needing_review(conn)),
         top_defaulters=balances[:5],
         monthly_totals=get_monthly_totals(conn),
+        total_sales=sales.total_sales,
+        sales_this_month=get_sales_this_month(conn),
+        unpaid_invoices_total=sales.pending_total,
+        unclassified_total=round(sum(e.amount for e in unclassified), 2),
+        unclassified_count=len(unclassified),
     )
 
 
@@ -76,6 +89,9 @@ _IN_SCOPE_HINTS = (
     "customer", "grahak", "ग्राहक", "khata", "ledger", "payment", "paisa",
     "rupay", "rupaye", "₹", "defaulter", "month", "mahina", "महीना",
     "sabse", "zyada", "how much", "how many", "who ", "amount", "list",
+    # Sales / billing vocabulary (Phase 8) — a kirana store sells goods too.
+    "bikri", "बिक्री", "becha", "bechi", "bech", "sale", "sales", "sold", "sell",
+    "selling", "bill", "invoice", "revenue",
 )
 
 
@@ -138,6 +154,32 @@ _TOP_PATTERNS = (
     r"\b(sabse zyada|sabse bada)\b.*\b(udhaar|udhar|baki|baaki)\b",
     r"\bkaun\b.*\bsabse zyada\b",
 )
+# Sales / billing questions (Phase 8). Any explicit sales word routes here; kept
+# separate from _TOTAL_PATTERNS (which is udhaar-outstanding) and CHECKED FIRST in
+# the router so "how much did I sell in total" isn't grabbed by the total pattern.
+_SALES_PATTERNS = (
+    r"\b(bikri|becha|bechi|bech)\b",                 # Hindi/Hinglish: sale / sold
+    r"\b(sold|sell|selling|sale|sales|revenue)\b",   # English
+)
+
+
+def _sales_answer(question: str, stats: LedgerStats) -> InsightAnswer:
+    """Answer a sales question straight from SQL-computed sales stats (no LLM).
+    'received' is total_sales minus pending invoices — deterministic arithmetic,
+    not an LLM guess."""
+    if not stats.total_sales:
+        return InsightAnswer(
+            question=question, answer="No sales are recorded in your ledger yet.",
+            source="deterministic",
+        )
+    received = round(stats.total_sales - stats.unpaid_invoices_total, 2)
+    answer = (
+        f"Your recorded sales total ₹{stats.total_sales:,.2f} — ₹{received:,.2f} received "
+        f"and ₹{stats.unpaid_invoices_total:,.2f} still pending as invoices."
+    )
+    if stats.sales_this_month:
+        answer += f" This month: ₹{stats.sales_this_month:,.2f}."
+    return InsightAnswer(question=question, answer=answer, source="deterministic")
 
 
 def _deterministic_router(question: str, stats: LedgerStats) -> Optional[InsightAnswer]:
@@ -148,6 +190,8 @@ def _deterministic_router(question: str, stats: LedgerStats) -> Optional[Insight
     (which still receives these exact totals as ground truth, so numbers stay honest).
     """
     text = question.lower()
+    if _matches_any(text, _SALES_PATTERNS):
+        return _sales_answer(question, stats)
     if _matches_any(text, _TOTAL_PATTERNS):
         answer = (
             f"Your customers owe you ₹{stats.total_outstanding:,.2f} in total, across "

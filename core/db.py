@@ -367,3 +367,19 @@ def get_monthly_totals(conn: sqlite3.Connection) -> List[MonthlyTotal]:
     ]
     totals.sort(key=lambda m: m.month)
     return totals
+
+
+def get_sales_this_month(conn: sqlite3.Connection, month: Optional[str] = None) -> float:
+    """Total sale-type amount whose raw date best-effort parses to `month`
+    (default = the current calendar month, 'YYYY-MM'). Sales with an unparseable
+    date are NOT counted here — they still count in get_sales_summary().total_sales.
+    Uses the same tolerant _parse_month() as get_monthly_totals (dates are raw
+    strings by design), summed in Python — never an LLM, never SQL SUM()."""
+    target = month or datetime.now().strftime("%Y-%m")
+    total = 0.0
+    for raw_date, amount in conn.execute(
+        "SELECT raw_date, amount FROM entries WHERE entry_type = 'sale'"
+    ):
+        if _parse_month(raw_date) == target:
+            total += amount
+    return round(total, 2)
