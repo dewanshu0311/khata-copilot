@@ -47,6 +47,13 @@ SOURCE_LABELS = {
     "template": ("📋 Template (no LLM)", "chip-template"),
 }
 
+# Per-entry type chips (Phase 8) — the two-axis model made visible on every card.
+TYPE_LABELS = {
+    "udhaar": ("🤝 Udhaar", "chip-udhaar"),
+    "sale": ("🧾 Sale", "chip-sale"),
+    "unknown": ("❓ Unclassified", "chip-unknown_type"),
+}
+
 
 # ── CSS (adapted from zyro-rag-challenge/app.py) ─────────────────────────────
 def inject_css() -> None:
@@ -114,6 +121,10 @@ def inject_css() -> None:
     .chip-template { background: rgba(245, 158, 11, 0.15); border-color: rgba(245, 158, 11, 0.35); color: #fcd34d; }
     .chip-guardrail_refusal { background: rgba(239, 68, 68, 0.15); border-color: rgba(239, 68, 68, 0.35); color: #fca5a5; }
     .chip-empty { background: rgba(148, 163, 184, 0.15); border-color: rgba(148, 163, 184, 0.3); color: #cbd5e1; }
+    /* entry_type chips (Phase 8): udhaar = indigo (credit), sale = green (goods sold), unclassified = amber (review). */
+    .chip-udhaar { background: rgba(99, 102, 241, 0.15); border-color: rgba(99, 102, 241, 0.3); color: #a5b4fc; }
+    .chip-sale { background: rgba(34, 197, 94, 0.15); border-color: rgba(34, 197, 94, 0.35); color: #86efac; }
+    .chip-unknown_type { background: rgba(245, 158, 11, 0.15); border-color: rgba(245, 158, 11, 0.35); color: #fcd34d; }
 
     [data-testid="stSidebar"] { background: linear-gradient(180deg, #0f1629, #0a0e1a) !important; border-right: 1px solid rgba(99, 102, 241, 0.1); }
     [data-testid="stSidebar"] .stMarkdown h1, [data-testid="stSidebar"] .stMarkdown h2, [data-testid="stSidebar"] .stMarkdown h3 { color: #e2e8f0 !important; }
@@ -157,6 +168,11 @@ def source_chip(source: str) -> str:
     return f'<span class="source-chip {cls}">{label}</span>'
 
 
+def type_chip(entry_type: str) -> str:
+    label, cls = TYPE_LABELS.get(entry_type, TYPE_LABELS["udhaar"])
+    return f'<span class="source-chip {cls}">{label}</span>'
+
+
 def stat_card(value: str, label: str) -> None:
     st.markdown(
         f'<div class="stat-card"><div class="stat-number">{value}</div>'
@@ -167,7 +183,7 @@ def stat_card(value: str, label: str) -> None:
 
 def render_entry_card(
     name: str, amount: float, date, status: str, confidence: float,
-    flagged: bool, messages=None,
+    flagged: bool, messages=None, entry_type: str = "udhaar",
 ) -> None:
     cls = "entry-flagged" if flagged else "entry-ok"
     badge = "🚩 NEEDS REVIEW" if flagged else "✅ OK"
@@ -182,7 +198,7 @@ def render_entry_card(
     st.markdown(f"""
     <div class="entry-card {cls}">
         <div style="display:flex; justify-content:space-between; align-items:center;">
-            <div style="font-weight:600; color:#e2e8f0; font-size:15px;">{name or "UNREADABLE"}</div>
+            <div style="font-weight:600; color:#e2e8f0; font-size:15px;">{name or "UNREADABLE"} &nbsp; {type_chip(entry_type)}</div>
             <div style="font-size:12px; color:{badge_color};">{badge}</div>
         </div>
         <div style="color:#94a3b8; font-size:13px; margin-top:4px;">
@@ -245,7 +261,7 @@ def render_scan_result(result: PageResult) -> None:
         flagged = page_level or idx in per_entry
         render_entry_card(
             entry.name, entry.amount, entry.date, entry.status, entry.confidence,
-            flagged, per_entry.get(idx),
+            flagged, per_entry.get(idx), entry_type=entry.entry_type,
         )
 
     if result.ingest:
@@ -388,23 +404,35 @@ with tab_scan:
 with tab_ledger:
     st.markdown("#### All Ledger Entries")
     entries = db.get_all_entries(conn)
-    search = st.text_input("Search by customer name", "", placeholder="e.g. Ramesh")
-    filtered = (
-        [e for e in entries if search.strip().lower() in e.customer_name.lower()]
-        if search.strip() else entries
+    # Segmented filter (Phase 8): udhaar credit vs sales, kept visibly separate.
+    # Unknown-type entries surface only under "All" — the honesty bucket.
+    type_choice = st.radio(
+        "Filter by type", ["All", "Udhaar", "Sales"], horizontal=True,
+        key="ledger_type_filter",
     )
+    search = st.text_input("Search by customer name", "", placeholder="e.g. Ramesh")
+
+    _type_map = {"Udhaar": "udhaar", "Sales": "sale"}
+    filtered = entries
+    if type_choice in _type_map:
+        filtered = [e for e in filtered if e.entry_type == _type_map[type_choice]]
+    if search.strip():
+        filtered = [e for e in filtered if search.strip().lower() in e.customer_name.lower()]
+
     if filtered:
         df = pd.DataFrame([e.model_dump() for e in filtered])
         df["needs_review"] = df["needs_review"].map({True: "🚩", False: ""})
         df = df[[
-            "customer_name", "amount", "raw_date", "status", "confidence",
+            "customer_name", "amount", "entry_type", "raw_date", "status", "confidence",
             "needs_review", "source_image", "scanned_at",
         ]].rename(columns={
-            "customer_name": "Customer", "amount": "Amount", "raw_date": "Date",
-            "status": "Status", "confidence": "Confidence", "needs_review": "Flagged",
-            "source_image": "Source Image", "scanned_at": "Scanned At",
+            "customer_name": "Customer", "amount": "Amount", "entry_type": "Type",
+            "raw_date": "Date", "status": "Status", "confidence": "Confidence",
+            "needs_review": "Flagged", "source_image": "Source Image", "scanned_at": "Scanned At",
         })
         st.dataframe(df, use_container_width=True, hide_index=True)
+    elif entries:
+        st.info("No entries match this filter.")
     else:
         st.info("No entries in the ledger yet — scan a page in the Scan tab.")
 
@@ -425,7 +453,10 @@ with tab_ledger:
         st.success("Nothing flagged — every stored entry passed verification.")
     else:
         for e in review:
-            render_entry_card(e.customer_name, e.amount, e.raw_date, e.status, e.confidence, flagged=True)
+            render_entry_card(
+                e.customer_name, e.amount, e.raw_date, e.status, e.confidence,
+                flagged=True, entry_type=e.entry_type,
+            )
 
 with tab_insights:
     st.markdown("#### At a Glance")
@@ -441,6 +472,20 @@ with tab_insights:
     with c4:
         top = stats.top_defaulters[0].name if stats.top_defaulters else "—"
         stat_card(top, "Top Defaulter")
+
+    # Billing / sales axis (Phase 8) — its own row so credit and sales never blur.
+    # The unclassified card appears ONLY when there is unclassified money to review
+    # (the honesty rule made visible), otherwise the row is just the two sale cards.
+    if stats.unclassified_total > 0:
+        sc1, sc2, sc3 = st.columns(3)
+        with sc3:
+            stat_card(f"₹{stats.unclassified_total:,.0f}", "Unclassified — needs review")
+    else:
+        sc1, sc2 = st.columns(2)
+    with sc1:
+        stat_card(f"₹{stats.sales_this_month:,.0f}", "Sales This Month")
+    with sc2:
+        stat_card(f"₹{stats.unpaid_invoices_total:,.0f}", "Unpaid Invoices")
 
     st.markdown('<div class="custom-divider"></div>', unsafe_allow_html=True)
     st.markdown("#### 💬 Ask Your Ledger")

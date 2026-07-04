@@ -299,23 +299,31 @@ def _parse_month(raw_date: str) -> str:
     return "unknown"
 
 
-# ── Demo data (Phase 7) ──────────────────────────────────────────────────────
-# A small, fixed set of clean entries so a judge demo of Insights/Reminders
-# doesn't depend on a live Gemini/Groq call or accumulated scan clutter. Goes
-# through the same ingest_page() path as a real scan (verdict "accept", no
-# issues) rather than raw SQL, so it stays consistent with real data shape.
-_DEMO_PAGES: list[tuple[str, list[dict]]] = [
-    ("demo_page_1.jpg", [
-        {"name": "Ramesh Kumar", "amount": 1200.0, "date": "5 Jan", "status": "unpaid", "confidence": 0.95, "raw_text": "Ramesh Kumar 1200 udhaar 5 Jan"},
-        {"name": "Sita Devi", "amount": 450.0, "date": "6 Jan", "status": "paid", "confidence": 0.92, "raw_text": "Sita Devi 450 jama 6 Jan"},
-        {"name": "Mohan Lal", "amount": 3200.0, "date": "8 Jan", "status": "unpaid", "confidence": 0.9, "raw_text": "Mohan Lal 3200 baki 8 Jan"},
-    ]),
-    ("demo_page_2.jpg", [
-        {"name": "Anita Sharma", "amount": 800.0, "date": "10 Jan", "status": "unpaid", "confidence": 0.88, "raw_text": "Anita Sharma 800 udhaar 10 Jan"},
-        {"name": "Ramesh Kumar", "amount": 600.0, "date": "15 Jan", "status": "paid", "confidence": 0.94, "raw_text": "Ramesh Kumar 600 jama 15 Jan"},
-        {"name": "Mohan Lal", "amount": 1500.0, "date": "18 Jan", "status": "unknown", "confidence": 0.55, "raw_text": "Mohan Lal 1500 ? 18 Jan"},
-    ]),
-]
+# ── Demo data (Phase 7, extended Phase 8) ────────────────────────────────────
+# A small, known set of entries so a judge demo of Insights/Reminders doesn't
+# depend on a live Gemini/Groq call or accumulated scan clutter. Covers BOTH
+# axes: udhaar credit AND sales/billing, plus ONE deliberately unclear line left
+# entry_type='unknown' so the unknown_type flag shows live. Sale dates are set to
+# the CURRENT month so the "Sales This Month" card is populated during the demo.
+# Goes through the real ingest_page() + audit() path, exactly like a true scan.
+def _demo_pages() -> "list[tuple[str, list[dict]]]":
+    now = datetime.now()
+    d1 = now.replace(day=5).strftime("%d/%m/%Y")   # this month, valid in every month
+    d2 = now.replace(day=18).strftime("%d/%m/%Y")
+    return [
+        ("demo_udhaar.jpg", [
+            {"name": "Ramesh Kumar", "amount": 1200.0, "date": "05/01/2026", "status": "unpaid", "entry_type": "udhaar", "confidence": 0.95, "raw_text": "Ramesh Kumar 1200 udhaar"},
+            {"name": "Sita Devi", "amount": 450.0, "date": "06/01/2026", "status": "paid", "entry_type": "udhaar", "confidence": 0.92, "raw_text": "Sita Devi 450 jama"},
+            {"name": "Mohan Lal", "amount": 3200.0, "date": "08/01/2026", "status": "unpaid", "entry_type": "udhaar", "confidence": 0.9, "raw_text": "Mohan Lal 3200 baki"},
+            {"name": "Anita Sharma", "amount": 800.0, "date": "10/01/2026", "status": "unpaid", "entry_type": "udhaar", "confidence": 0.88, "raw_text": "Anita Sharma 800 udhaar"},
+        ]),
+        ("demo_sales.jpg", [
+            {"name": "Karan Traders", "amount": 2500.0, "date": d1, "status": "paid", "entry_type": "sale", "confidence": 0.93, "raw_text": "Karan Traders 2500 cash sale bill"},
+            {"name": "Deepak Store", "amount": 1800.0, "date": d2, "status": "unpaid", "entry_type": "sale", "confidence": 0.9, "raw_text": "Deepak Store 1800 invoice pending"},
+            {"name": "Vijay Kumar", "amount": 650.0, "date": d1, "status": "paid", "entry_type": "sale", "confidence": 0.95, "raw_text": "Vijay Kumar 650 cash sale"},
+            {"name": "Suresh", "amount": 900.0, "date": None, "status": "unknown", "entry_type": "unknown", "confidence": 0.6, "raw_text": "Suresh 900 (udhaar ya sale? unclear)"},
+        ]),
+    ]
 
 
 def clear_all(conn: sqlite3.Connection) -> None:
@@ -325,25 +333,23 @@ def clear_all(conn: sqlite3.Connection) -> None:
 
 
 def seed_demo_data(conn: sqlite3.Connection) -> IngestSummary:
-    """Clear the ledger and load a fixed, known-good set of demo entries.
-
-    Lets a judge demo run Insights/Reminders instantly without a real scan.
+    """Clear the ledger and load a known set of demo entries spanning BOTH udhaar
+    and sales, plus one unclassified line. Each page runs through the real audit()
+    so flags (incl. unknown_type and the low-confidence unclassified line) show
+    exactly as a live scan would. Lets a judge demo Insights/Reminders instantly.
     """
+    from agents.verification_agent import audit  # local import: avoids a db->agents cycle
+
     clear_all(conn)
     total_inserted = total_updated = 0
-    for source_image, raw_entries in _DEMO_PAGES:
+    for source_image, raw_entries in _demo_pages():
         entries = [LedgerEntry(**e) for e in raw_entries]
         page = PageExtraction(
             source_image=source_image, entries=entries,
             overall_confidence=sum(e.confidence for e in entries) / len(entries),
             notes="Demo data (Load Demo Data button) — not a real scan.",
         )
-        verification = VerificationResult(
-            source_image=source_image, verdict="accept",
-            overall_confidence=page.overall_confidence,
-            computed_total=sum(e.amount for e in entries),
-        )
-        summary = ingest_page(conn, page, verification)
+        summary = ingest_page(conn, page, audit(page))
         total_inserted += summary.inserted
         total_updated += summary.updated
     return IngestSummary(
