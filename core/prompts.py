@@ -57,8 +57,15 @@ a shop sale not tied to a running customer credit.
 counted in NEITHER total.
   Most khata lines are "udhaar"; use "sale" only when there is clear bill/cash-sale context.
 - date: copy it verbatim, do NOT reformat or guess a year that isn't written. Use null if absent.
-- confidence: your HONEST certainty for that specific line. A blurry name or a "3 vs 8" ambiguity should \
-score well below 0.8 so a human reviews it.
+- confidence: a CALIBRATED 0.0-1.0 estimate of how sure you are about THIS line. Score it as your certainty \
+about the LEAST certain field on the line (name, amount, date, or status) — one shaky field lowers the whole \
+line. This is handwriting, so full certainty is rare: do NOT default to 1.0. Use this scale:
+    * 0.95-1.0  crisp, clearly-formed text, no ambiguity at all
+    * 0.80-0.94 readable but with minor doubt (one slightly unclear letter/digit)
+    * 0.50-0.79 a plausibly misread name or ambiguous digit (e.g. 3 vs 8, ल vs भ) — a human should double-check
+    * below 0.50 smudged, overwritten, or largely guessed
+  If you are torn between two readings, pick one but LOWER the confidence and put the alternative in "raw_text" \
+or "notes". Reserve 1.0 for the rare truly unambiguous line.
 - written_total: only if the shopkeeper wrote a sum/total on the page; otherwise null.
 - If the image is not a ledger or is fully illegible, return "entries": [] and explain in "notes".
 
