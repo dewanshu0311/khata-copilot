@@ -45,11 +45,15 @@ def test_gemini_failure_falls_back_to_groq(monkeypatch):
     def fake_gemini(image_path, feedback):
         return None, "quota exceeded"
 
+    def fake_secondary(image_path, feedback):
+        return None, "no secondary vision key configured"
+
     def fake_groq(image_path, feedback):
         return _fake_extraction("groq", notes="Read via Groq vision fallback"), None
 
     monkeypatch.setattr(vision_agent, "_load_image", lambda p: type("I", (), {"close": lambda self: None})())
     monkeypatch.setattr(vision_agent, "_extract_page_gemini", fake_gemini)
+    monkeypatch.setattr(vision_agent, "_extract_page_secondary", fake_secondary)
     monkeypatch.setattr(vision_agent, "_extract_page_groq_vision", fake_groq)
     monkeypatch.setenv("KHATA_MOCK", "0")
 
@@ -63,11 +67,15 @@ def test_both_readers_fail_falls_back_to_mock(monkeypatch):
     def fake_gemini(image_path, feedback):
         return None, "quota exceeded"
 
+    def fake_secondary(image_path, feedback):
+        return None, "no secondary vision key configured"
+
     def fake_groq(image_path, feedback):
         return None, "no GROQ_API_KEY configured"
 
     monkeypatch.setattr(vision_agent, "_load_image", lambda p: type("I", (), {"close": lambda self: None})())
     monkeypatch.setattr(vision_agent, "_extract_page_gemini", fake_gemini)
+    monkeypatch.setattr(vision_agent, "_extract_page_secondary", fake_secondary)
     monkeypatch.setattr(vision_agent, "_extract_page_groq_vision", fake_groq)
     monkeypatch.setenv("KHATA_MOCK", "0")
 

@@ -18,6 +18,14 @@ GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 # handwriting than Gemini — it's a "keep the demo alive" fallback, not a
 # replacement.
 GROQ_VISION_MODEL = os.getenv("GROQ_VISION_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
+# Secondary vision reader: an OpenAI-compatible endpoint serving google/gemini-2.5-flash.
+# Tried AFTER the primary Gemini key and BEFORE the Groq vision fallback: it is a
+# stronger reader on messy handwriting than Groq and — unlike the Gemini free
+# tier — is not quota-blocked. Its base URL and key live only in .env (gitignored),
+# so the endpoint is never committed; if SECONDARY_VISION_BASE_URL / SECONDARY_VISION_KEY
+# are unset the reader is simply skipped. Read directly (not the {SERVICE}_API_KEYS naming).
+SECONDARY_VISION_BASE_URL = os.getenv("SECONDARY_VISION_BASE_URL", "")
+SECONDARY_VISION_MODEL = os.getenv("SECONDARY_VISION_MODEL", "google/gemini-2.5-flash")
 
 # ── Confidence / review policy ───────────────────────────────────────────────
 # Entries at or below this confidence get flagged for one-tap human review in

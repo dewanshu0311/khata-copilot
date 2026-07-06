@@ -30,6 +30,8 @@ from pydantic import ValidationError
 
 from core import prompts
 from core.config import (
+    SECONDARY_VISION_BASE_URL,
+    SECONDARY_VISION_MODEL,
     GEMINI_VISION_MODEL,
     GROQ_VISION_MODEL,
     KEY_COOLDOWN_SECONDS,
@@ -262,14 +264,93 @@ def _extract_page_groq_vision(image_path: str, correction_feedback: Optional[str
     return None, last_error or "unknown Groq vision failure"
 
 
+# ── Secondary vision reader (OpenAI-compatible, google/gemini-2.5-flash) ──────
+# Tried AFTER the primary Gemini key and BEFORE the Groq fallback: a stronger
+# reader on messy handwriting than Groq, and not blocked by the Gemini free-tier
+# quota. OpenAI-compatible endpoint, so we call it over plain HTTP (requests) —
+# no new SDK dependency. Its base URL and key are read from .env (gitignored) via
+# SECONDARY_VISION_BASE_URL / SECONDARY_VISION_KEY; if either is unset it is skipped.
+def _extract_page_secondary(image_path: str, correction_feedback: Optional[str]) -> tuple[Optional[PageExtraction], Optional[str]]:
+    """Try the secondary vision endpoint. Returns (extraction, None) on success,
+    or (None, reason) so the caller knows to try the Groq fallback next."""
+    import os
+
+    key = os.getenv("SECONDARY_VISION_KEY")
+    if not key:
+        return None, "no secondary vision key configured"
+    if not SECONDARY_VISION_BASE_URL:
+        return None, "no secondary vision endpoint configured"
+    try:
+        import requests
+    except ImportError:
+        return None, "requests not installed"
+
+    try:
+        with open(image_path, "rb") as f:
+            image_b64 = base64.b64encode(f.read()).decode("ascii")
+    except Exception as e:
+        return None, f"could not open image: {e}"
+
+    ext = image_path.rsplit(".", 1)[-1].lower() if "." in image_path else "jpeg"
+    mime = "image/png" if ext == "png" else "image/jpeg"
+    prompt = _build_prompt(correction_feedback)
+    messages = [
+        {"role": "system", "content": prompts.VISION_SYSTEM_PROMPT},
+        {"role": "user", "content": [
+            {"type": "text", "text": prompt},
+            {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{image_b64}"}},
+        ]},
+    ]
+    body = {
+        "model": SECONDARY_VISION_MODEL, "messages": messages,
+        "temperature": 0.1, "response_format": {"type": "json_object"},
+    }
+
+    last_error: Optional[str] = None
+    for _attempt in range(MAX_VISION_RETRIES + 1):
+        try:
+            resp = requests.post(
+                f"{SECONDARY_VISION_BASE_URL}/chat/completions",
+                headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                json=body, timeout=180,
+            )
+        except Exception as e:
+            last_error = f"request error: {e}"
+            break  # network/DNS — no point retrying the same call immediately
+        if resp.status_code == 429:  # rate limited — bounded retry
+            last_error = f"HTTP 429 rate limited: {resp.text[:160]}"
+            continue
+        if resp.status_code != 200:
+            return None, f"HTTP {resp.status_code}: {resp.text[:160]}"
+        try:
+            data = resp.json()
+            text = _strip_code_fences(data["choices"][0]["message"]["content"] or "")
+            payload = json.loads(text)
+            if not isinstance(payload, dict):
+                raise ValueError("Model did not return a JSON object")
+        except Exception as e:
+            last_error = f"Invalid JSON from secondary reader: {e}"
+            continue
+        extraction = _extraction_from_payload(payload, image_path, degraded=False)
+        extraction.notes = (
+            (extraction.notes + " | " if extraction.notes else "")
+            + "Read via gemini-2.5-flash — used because the primary "
+            "Gemini free-tier key is quota-blocked."
+        )
+        return extraction, None
+
+    return None, last_error or "unknown secondary reader failure"
+
+
 def extract_page(image_path: str, correction_feedback: Optional[str] = None) -> PageExtraction:
     """Read a handwritten khata page into a validated PageExtraction.
 
     Always returns a PageExtraction — on unrecoverable failure it is flagged
     degraded with an error message, never an exception, so the demo survives.
 
-    Reader order: Gemini (primary) -> Groq vision (fallback) -> mock (last
-    resort, only if both real readers are unavailable/fail).
+    Reader order: Gemini (primary) -> secondary reader (google/gemini-2.5-flash,
+    OpenAI-compatible) -> Groq vision -> mock (last resort, only if every real
+    reader is unavailable/fails).
 
     correction_feedback: optional text from the Verification Agent (Phase 2)
         describing a problem it found (e.g. a math mismatch). When present it is
@@ -296,11 +377,18 @@ def extract_page(image_path: str, correction_feedback: Optional[str] = None) -> 
     if gemini_result is not None:
         return gemini_result
 
+    secondary_result, secondary_reason = _extract_page_secondary(image_path, correction_feedback)
+    if secondary_result is not None:
+        return secondary_result
+
     groq_result, groq_reason = _extract_page_groq_vision(image_path, correction_feedback)
     if groq_result is not None:
         return groq_result
 
     return _mock_extraction(
         image_path,
-        reason=f"Gemini failed ({gemini_reason}); Groq vision fallback also failed ({groq_reason})",
+        reason=(
+            f"Gemini failed ({gemini_reason}); secondary reader failed ({secondary_reason}); "
+            f"Groq vision fallback also failed ({groq_reason})"
+        ),
     )

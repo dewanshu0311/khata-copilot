@@ -224,8 +224,37 @@ def render_scan_result(result: PageResult) -> None:
     extraction = result.extraction
     verification = result.verification
 
-    if mock_mode_enabled() or extraction.degraded:
-        st.warning("⚙️ MOCK MODE — this extraction is synthetic demo data (no live Gemini call was made).")
+    # Honest reader-status banner (Phase 8.1): say which reader actually produced
+    # this page and why — never claim "no live call was made" when one was. Four
+    # cases: offline mock, a FAILED live read (placeholder data), a fallback
+    # reader that succeeded, or a clean primary Gemini read.
+    if mock_mode_enabled():
+        st.warning("⚙️ MOCK MODE — offline demo data (KHATA_MOCK=1). No live model was called.")
+    elif extraction.degraded:
+        st.error(
+            "🛑 Live read FAILED — the numbers below are placeholder data, NOT your page. "
+            "Re-scan after fixing the reader; the reason is shown below."
+        )
+        reason = extraction.error or extraction.notes
+        if reason:
+            st.caption(f"Why: {reason[:400]}")
+    else:
+        notes = extraction.notes or ""
+        if "gemini-2.5-flash" in notes:
+            st.info(
+                "↩️ Read via **gemini-2.5-flash** — the primary Gemini key is "
+                "quota-blocked, so the pipeline used its next reader."
+            )
+        elif "Groq vision fallback" in notes:
+            st.info(
+                "↩️ Read via **Groq fallback** (Gemini unavailable) — a weaker reader on messy "
+                "handwriting, so check flagged entries carefully."
+            )
+        else:
+            st.success("✅ Read live via Gemini (primary reader).")
+        if notes.strip():
+            with st.expander("📝 Reader notes — what the model flagged as uncertain"):
+                st.write(notes)
 
     for err in result.stage_errors:
         st.error(err)

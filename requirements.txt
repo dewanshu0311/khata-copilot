@@ -6,6 +6,7 @@ google-generativeai>=0.8.0     # Gemini 2.0 Flash vision (free tier)
 pydantic>=2.6                  # validated schemas everywhere
 python-dotenv>=1.0             # .env loading (keys)
 pillow>=10.0                   # image loading for the vision agent
+requests>=2.31                 # plain-HTTP call to the secondary vision endpoint
 rich>=13.0                     # pretty CLI tables / logs
 
 # ── Phase 2+: reasoning (verification, insights, reminders) ──────────────────
