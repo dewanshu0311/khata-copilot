@@ -36,7 +36,7 @@ Photo ──▶ Vision ──▶ Verification ──▶ Ledger ──▶ Insight
 | **Vision** | `agents/vision_agent.py` | Reads a photo into a `PageExtraction`, classifying each line as udhaar/sale/unknown (Gemini 2.0 Flash → `gemini-2.5-flash` secondary reader → Groq vision → mock, see below). |
 | **Verification** | `agents/verification_agent.py` | Pure-Python audit: math mismatch, absurd amounts, missing fields, low confidence. **Flags, never fixes.** Can ask Vision for one bounded re-read if it suspects a whole-page misread. |
 | **Ledger** (`core/db.py`) | — | SQLite storage. Dedup keyed on (customer, amount, date, source image) so re-scanning a page updates rather than duplicates. |
-| **Insights** | `agents/insights_agent.py` | Hybrid FAISS + BM25 search over ledger entries. Deterministic totals are computed in Python and injected into the LLM's context — the LLM phrases the answer, never recalculates it. A guardrail refuses out-of-scope questions. |
+| **Insights** | `agents/insights_agent.py` | A deterministic router answers money questions straight from SQL — totals, sales, and ranking ("top N who owe most" honoring the requested count, "who owes least"). Everything else goes through hybrid FAISS + BM25 retrieval; the LLM phrases the answer around exact pre-computed numbers, never recalculates them. A guardrail refuses out-of-scope questions. |
 | **Reminder** | `agents/reminder_agent.py` | Drafts a bilingual reminder per customer with an outstanding balance. The amount is always the exact deterministic figure; the LLM only writes the wording. |
 
 `core/orchestrator.py` runs Vision → Verification → Ledger sequentially for
@@ -57,9 +57,11 @@ This is the core idea of the project, not an afterthought:
   **excluded from both** totals — an unclassified line is honestly counted in
   neither, rather than silently inflating one.
 - **Source tags.** Every Insights answer is tagged with where it came from:
-  `deterministic` (pure SQL), `llm` (grounded RAG), `extractive_fallback`
-  (no LLM available), `guardrail_refusal`, or `template` (Reminder agent
-  without a live Groq call). Judges can see exactly how confident to be.
+  `deterministic` (pure SQL — totals, sales, and ranking), `llm` (grounded RAG),
+  `extractive_fallback` (no LLM available), `guardrail_refusal`, or `empty`
+  (in scope but nothing relevant in the ledger). Reminder drafts carry their own
+  `llm`/`template` tag (`template` = drafted without a live Groq call). Judges
+  can see exactly how confident to be.
 - **Self-flagging, not self-fixing.** The Verification Agent's whole job is to
   find problems and flag them for human review — it never silently edits a
   number to make totals balance. A flagged low-confidence entry is the
