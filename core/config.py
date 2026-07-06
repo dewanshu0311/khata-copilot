@@ -9,6 +9,17 @@ from __future__ import annotations
 
 import os
 
+# Load .env HERE — config is imported before core.key_manager (which also calls
+# load_dotenv), so any env-driven constant below (e.g. SECONDARY_VISION_BASE_URL)
+# would otherwise be read before .env is loaded and captured empty. override=False
+# means real OS env / test monkeypatching still wins.
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv(override=False)
+except ImportError:  # dotenv is a declared dep, but never hard-fail config on it
+    pass
+
 # ── Models (all free tier) ──────────────────────────────────────────────────
 # Gemini handles handwriting vision; Groq handles later reasoning phases.
 GEMINI_VISION_MODEL = os.getenv("GEMINI_VISION_MODEL", "gemini-2.0-flash")
