@@ -126,9 +126,10 @@ failed read is labeled as failed, not disguised as mock.
 
 ## Tests
 
-29 tests from Phases 1–5, 5 Phase 7 tests for the vision fallback ordering, and
+29 tests from Phases 1–5, 5 Phase 7 tests for the vision fallback ordering,
 12 Phase 8 tests for billing/sales separation (udhaar vs sale rollups, deterministic
-sales stats) — **46 passing**.
+sales stats), and 3 for the deterministic ranking router (top-N honoring the
+requested count, "who owes least") — **49 passing**.
 
 ```powershell
 "C:\Khata Copilot\.venv\Scripts\python.exe" -m pytest -v

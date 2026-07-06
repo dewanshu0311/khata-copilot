@@ -80,6 +80,32 @@ def test_router_top_defaulter_is_deterministic():
     assert "Ramesh Kumar" in ans.answer
 
 
+def test_router_top_n_honors_requested_count():
+    # "top 2" must list exactly the two biggest (Ramesh, Mohan) and NOT the third
+    # (Gita) — the old code always returned a fixed 3 regardless of the number asked.
+    ans = ask("give me the top 2 people who owe me the most", _seed())
+    assert ans.source == "deterministic"
+    assert "Ramesh Kumar" in ans.answer and "Mohan" in ans.answer
+    assert "Gita" not in ans.answer
+    assert len(ans.citations) == 2
+
+
+def test_router_top_n_more_than_exist_says_so():
+    # Only 3 customers have a balance; asking for 5 should honestly say "Only 3".
+    ans = ask("top 5 defaulters", _seed())
+    assert ans.source == "deterministic"
+    assert "Only 3" in ans.answer
+    assert all(n in ans.answer for n in ("Ramesh Kumar", "Mohan", "Gita"))
+
+
+def test_router_least_is_deterministic():
+    # The mirror question the old router couldn't answer at all — Gita owes the least.
+    ans = ask("who owes me the least?", _seed())
+    assert ans.source == "deterministic"
+    assert "Gita" in ans.answer
+    assert "200" in ans.answer
+
+
 # ── 3. Hybrid search: exact name (BM25, always) + semantic query (SBERT) ──────
 def test_search_finds_customer_by_exact_name():
     index = LedgerSearchIndex(get_all_entries(_seed()))

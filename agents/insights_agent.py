@@ -8,8 +8,9 @@ The design is deliberately split so money numbers can never be hallucinated:
 
   1. DETERMINISTIC stats (total outstanding, top defaulters, monthly totals) are
      computed straight from SQL by compute_stats(). No LLM ever touches them.
-  2. A tiny ROUTER answers the two unambiguous money questions ("total outstanding?",
-     "who owes the most?") directly from those stats — source="deterministic".
+  2. A tiny ROUTER answers the unambiguous money questions directly from SQL —
+     total outstanding, sales, and ranking ("top N who owe most", "who owes the
+     least", honoring the requested count) — source="deterministic".
   3. Everything else goes through RAG: a GUARDRAIL (out-of-scope questions are
      politely refused), hybrid RETRIEVAL of the relevant entries, then Groq
      generates an answer GROUNDED in those entries plus the exact pre-computed
@@ -88,7 +89,8 @@ _IN_SCOPE_HINTS = (
     "balance", "outstanding", "total", "kitna", "kitni", "kitne", "kaun", "kis",
     "customer", "grahak", "ग्राहक", "khata", "ledger", "payment", "paisa",
     "rupay", "rupaye", "₹", "defaulter", "month", "mahina", "महीना",
-    "sabse", "zyada", "how much", "how many", "who ", "amount", "list",
+    "sabse", "zyada", "kam", "how much", "how many", "who ", "amount", "list",
+    "most", "least", "lowest", "smallest", "highest", "top", "biggest",
     # Sales / billing vocabulary (Phase 8) — a kirana store sells goods too.
     "bikri", "बिक्री", "becha", "bechi", "bech", "sale", "sales", "sold", "sell",
     "selling", "bill", "invoice", "revenue",
@@ -149,11 +151,37 @@ _TOTAL_PATTERNS = (
     r"\b(kitna|kitni|kitne)\b.*\b(total|udhaar|udhar|baki|baaki)\b",
 )
 _TOP_PATTERNS = (
-    r"\b(top|biggest|largest|highest)\b.*\b(defaulter|debtor|borrower)\b",
+    r"\b(top|biggest|largest|highest)\b.*\b(defaulters?|debtors?|borrowers?)\b",
+    r"\b(top|biggest|largest|highest)\b.*\bowes?\b",           # "top 5 who owe..."
     r"\bwho\b.*\bowes?\b.*\b(most|the most|highest|maximum)\b",
     r"\b(sabse zyada|sabse bada)\b.*\b(udhaar|udhar|baki|baaki)\b",
     r"\bkaun\b.*\bsabse zyada\b",
 )
+# "who owes the LEAST" — the mirror of _TOP_PATTERNS. Checked separately so it is
+# never grabbed by the top branch (top requires most/highest, never least).
+_LEAST_PATTERNS = (
+    r"\b(lowest|smallest)\b.*\b(defaulters?|debtors?|borrowers?|balances?|udhaar|udhar|baki|baaki)\b",
+    r"\bwho\b.*\bowes?\b.*\b(least|the least|lowest|smallest|minimum)\b",
+    r"\b(sabse kam|sabse chhota|sabse chota)\b.*\b(udhaar|udhar|baki|baaki)\b",
+    r"\bkaun\b.*\bsabse kam\b",
+)
+
+
+def _parse_count(question: str, cap: int = 10) -> Optional[int]:
+    """Pull the requested list size out of a question ("top 5", "3 customers").
+    Returns None when no count is given (caller then uses its singular default),
+    else the count clamped to [1, cap] so a huge number can't blow up the answer."""
+    text = question.lower()
+    m = re.search(r"\b(?:top|first|list|show|give(?:\s+me)?|name)\D{0,12}(\d{1,3})\b", text)
+    if not m:
+        m = re.search(
+            r"\b(\d{1,3})\s+(?:people|persons?|customers?|names?|log|logo|naam|"
+            r"defaulters?|debtors?|borrowers?)\b",
+            text,
+        )
+    if not m:
+        return None
+    return max(1, min(int(m.group(1)), cap))
 # Sales / billing questions (Phase 8). Any explicit sales word routes here; kept
 # separate from _TOTAL_PATTERNS (which is udhaar-outstanding) and CHECKED FIRST in
 # the router so "how much did I sell in total" isn't grabbed by the total pattern.
@@ -182,8 +210,49 @@ def _sales_answer(question: str, stats: LedgerStats) -> InsightAnswer:
     return InsightAnswer(question=question, answer=answer, source="deterministic")
 
 
-def _deterministic_router(question: str, stats: LedgerStats) -> Optional[InsightAnswer]:
-    """Answer the two unambiguous money questions straight from SQL-computed stats.
+def _ranked_answer(question: str, balances: list, *, least: bool) -> InsightAnswer:
+    """Build a deterministic 'top/least N' answer from the FULL sorted balance list
+    (highest-first). Honors an explicit count from the question ("top 5"); with no
+    count it gives the single most/least, plus two for context on the 'most' side."""
+    if not balances:
+        return InsightAnswer(
+            question=question, answer="No customer currently has an outstanding balance.",
+            source="deterministic",
+        )
+    ordered = list(reversed(balances)) if least else balances  # smallest-first for 'least'
+    n = _parse_count(question)
+    if n is None:
+        one = ordered[0]
+        superlative = "least" if least else "most"
+        answer = f"{one.name} owes you the {superlative}, at ₹{one.unpaid_total:,.2f}."
+        if not least:  # a little context is natural for "who owes the most"
+            others = ordered[1:3]
+            if others:
+                answer += " Next: " + ", ".join(
+                    f"{d.name} (₹{d.unpaid_total:,.0f})" for d in others
+                ) + "."
+        shown = ordered[:3]
+    else:
+        shown = ordered[:n]
+        listed = "; ".join(
+            f"{i}. {d.name} — ₹{d.unpaid_total:,.2f}" for i, d in enumerate(shown, 1)
+        )
+        label = "lowest" if least else "top"
+        if len(shown) < n:  # they asked for more than exist — say so, don't pad
+            answer = (
+                f"Only {len(shown)} customer(s) have an outstanding balance — "
+                f"{label} {len(shown)}: {listed}."
+            )
+        else:
+            answer = f"{label.capitalize()} {len(shown)} by outstanding balance: {listed}."
+    return InsightAnswer(
+        question=question, answer=answer, source="deterministic",
+        citations=[f"{d.name}: ₹{d.unpaid_total:,.2f}" for d in shown],
+    )
+
+
+def _deterministic_router(question: str, stats: LedgerStats, conn) -> Optional[InsightAnswer]:
+    """Answer the unambiguous money questions straight from SQL-computed figures.
 
     Returns None for anything nuanced, which then flows to RAG+LLM. Deterministic
     answers are templated English; a nuanced Hindi question instead goes to the LLM
@@ -198,22 +267,13 @@ def _deterministic_router(question: str, stats: LedgerStats) -> Optional[Insight
             f"{stats.customer_count} customer(s) with a pending balance."
         )
         return InsightAnswer(question=question, answer=answer, source="deterministic")
+    # Ranking questions use the FULL balance list (not the capped top_defaulters), so
+    # "top 10" is answerable and "who owes least" is exact — check least before top
+    # since "least" is the more specific word.
+    if _matches_any(text, _LEAST_PATTERNS):
+        return _ranked_answer(question, get_all_balances(conn), least=True)
     if _matches_any(text, _TOP_PATTERNS):
-        if not stats.top_defaulters:
-            return InsightAnswer(
-                question=question, answer="No customer currently has an outstanding balance.",
-                source="deterministic",
-            )
-        top = stats.top_defaulters[0]
-        others = stats.top_defaulters[1:3]
-        tail = ""
-        if others:
-            tail = " Next: " + ", ".join(f"{d.name} (₹{d.unpaid_total:,.0f})" for d in others) + "."
-        answer = f"{top.name} owes you the most, at ₹{top.unpaid_total:,.2f}.{tail}"
-        return InsightAnswer(
-            question=question, answer=answer, source="deterministic",
-            citations=[f"{d.name}: ₹{d.unpaid_total:,.2f}" for d in stats.top_defaulters[:3]],
-        )
+        return _ranked_answer(question, get_all_balances(conn), least=False)
     return None
 
 
@@ -257,7 +317,7 @@ def ask(
         )
 
     # 2) Deterministic router — money numbers answered without the LLM.
-    routed = _deterministic_router(question, stats)
+    routed = _deterministic_router(question, stats, conn)
     if routed is not None:
         return routed
 
