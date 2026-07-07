@@ -315,6 +315,8 @@ def _demo_pages() -> "list[tuple[str, list[dict]]]":
             {"name": "Ramesh Kumar", "amount": 1200.0, "date": "05/01/2026", "status": "unpaid", "entry_type": "udhaar", "confidence": 0.95, "raw_text": "Ramesh Kumar 1200 udhaar"},
             {"name": "Sita Devi", "amount": 450.0, "date": "06/01/2026", "status": "paid", "entry_type": "udhaar", "confidence": 0.92, "raw_text": "Sita Devi 450 jama"},
             {"name": "Mohan Lal", "amount": 3200.0, "date": "08/01/2026", "status": "unpaid", "entry_type": "udhaar", "confidence": 0.9, "raw_text": "Mohan Lal 3200 baki"},
+            {"name": "Priya Verma", "amount": 2100.0, "date": "09/01/2026", "status": "unpaid", "entry_type": "udhaar", "confidence": 0.91, "raw_text": "Priya Verma 2100 udhaar"},
+            {"name": "Salim Khan", "amount": 1500.0, "date": "11/01/2026", "status": "unpaid", "entry_type": "udhaar", "confidence": 0.89, "raw_text": "Salim Khan 1500 baki"},
             {"name": "Anita Sharma", "amount": 800.0, "date": "10/01/2026", "status": "unpaid", "entry_type": "udhaar", "confidence": 0.88, "raw_text": "Anita Sharma 800 udhaar"},
         ]),
         ("demo_sales.jpg", [
