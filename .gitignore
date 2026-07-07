@@ -1,13 +1,16 @@
-# Secrets
+# Secrets — never commit real keys or the private reader endpoint
 .env
+.env.local
+*.key
 
 # Python
 __pycache__/
 *.py[cod]
 .venv/
 venv/
+.pytest_cache/
 
-# Project data (generated)
+# Project data (generated / private)
 *.db
 *.sqlite3
 faiss_index/
@@ -15,3 +18,7 @@ sample_data/*.jpg
 sample_data/*.jpeg
 sample_data/*.png
 sample_data/uploads/
+
+# Personal — internal recording/demo notes, not for the public repo
+Khata_Copilot_Demo_Script*.md
+*_Demo_Script*.md
